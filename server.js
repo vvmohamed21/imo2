@@ -11,6 +11,8 @@ const cors = require('cors');
 const app = express();
 app.use(cors());
 app.use(express.json());
+const path = require('path');
+app.use(express.static(path.join(__dirname, 'public')));
 
 const server = http.createServer(app);
 const io = new Server(server, {
@@ -75,12 +77,20 @@ app.get('/health', (req, res) => {
   res.json({ status: 'ok', uptime: process.uptime() });
 });
 
+// Direct APK Download Endpoint
+app.get('/download', (req, res) => {
+  const apkPath = path.join(__dirname, 'public', 'watchroom.apk');
+  res.download(apkPath, 'watchroom.apk');
+});
+
 // In-App Self Update Endpoint
 app.get('/api/version', (req, res) => {
+  const host = req.get('host');
+  const protocol = req.protocol === 'https' || req.get('x-forwarded-proto') === 'https' ? 'https' : 'http';
   res.json({
     versionCode: 2,
     versionName: "1.0.1",
-    apkUrl: "https://github.com/vvmohamed21/watchroom/releases/latest/download/watchroom.apk",
+    apkUrl: `${protocol}://${host}/download`,
     changelog: "Added full cloud server support, Render hosting config, and in-app self updater.",
     forceUpdate: false
   });
