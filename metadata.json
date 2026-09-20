@@ -1,0 +1,6 @@
+{
+  "name": "WatchRoom",
+  "description": "Cloud-ready synchronized Watch Together mobile application with stream sniffing, native ExoPlayer playback, voice mesh, and in-app self-updater.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
