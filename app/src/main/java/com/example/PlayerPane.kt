@@ -1,8 +1,17 @@
 package com.example
 
+import android.annotation.SuppressLint
 import android.content.Context
 import android.net.Uri
+import android.util.Log
 import android.view.ViewGroup
+import android.webkit.CookieManager
+import android.webkit.JavascriptInterface
+import android.webkit.WebChromeClient
+import android.webkit.WebResourceRequest
+import android.webkit.WebSettings
+import android.webkit.WebView
+import android.webkit.WebViewClient
 import android.widget.FrameLayout
 import androidx.annotation.OptIn
 import androidx.compose.animation.AnimatedVisibility
@@ -25,13 +34,17 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material.icons.filled.FastForward
 import androidx.compose.material.icons.filled.FastRewind
 import androidx.compose.material.icons.filled.Fullscreen
 import androidx.compose.material.icons.filled.FullscreenExit
 import androidx.compose.material.icons.filled.Language
+import androidx.compose.material.icons.filled.OpenInBrowser
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Public
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Replay10
 import androidx.compose.material.icons.filled.Tv
 import androidx.compose.material.icons.filled.Warning
@@ -60,6 +73,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -67,17 +81,17 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MimeTypes
-import android.webkit.CookieManager
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.exoplayer.ExoPlayer
-import androidx.media3.exoplayer.hls.HlsMediaSource
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.ui.PlayerView
 import kotlinx.coroutines.delay
 import java.util.Locale
+
+private const val TAG = "PlayerPane"
 
 @OptIn(UnstableApi::class)
 @Composable
@@ -94,6 +108,10 @@ fun PlayerPane(
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
+
+    // Player Engine: "native" (ExoPlayer) or "web" (Hardware-accelerated HTML5 / Hls.js WebView)
+    var playerEngine by remember { mutableStateOf("native") }
+
     var isPlaying by remember { mutableStateOf(false) }
     var currentPositionMs by remember { mutableLongStateOf(0L) }
     var durationMs by remember { mutableLongStateOf(0L) }
@@ -106,31 +124,33 @@ fun PlayerPane(
     // Anti-echo suppression timestamp: local actions are ignored from re-triggering network events
     var suppressUntilMs by remember { mutableLongStateOf(0L) }
 
-    // ExoPlayer creation with specialized Referer, User-Agent, and Cookies for streaming sites
+    // ExoPlayer creation with clean, non-conflicting headers for streaming sites
     val exoPlayer = remember(context) {
         val uri = try { Uri.parse(mediaUrl) } catch (e: Exception) { Uri.EMPTY }
         val host = uri.host ?: ""
         val resolvedReferer = when {
             referer.isNotBlank() -> referer
-            host.contains("qfilm") -> "https://a.qfilm.tv/"
-            host.contains("egybest") -> "https://www.egybest.co.in/"
             host.isNotBlank() -> "${uri.scheme ?: "https"}://$host/"
-            else -> "https://www.egybest.co.in/"
+            else -> ""
         }
-        val origin = if (host.isNotBlank()) "${uri.scheme ?: "https"}://$host" else "https://www.egybest.co.in"
         val cookieHeader = try {
-            CookieManager.getInstance().getCookie(resolvedReferer)
-                ?: CookieManager.getInstance().getCookie(mediaUrl)
-                ?: ""
+            if (resolvedReferer.isNotBlank()) {
+                CookieManager.getInstance().getCookie(resolvedReferer)
+                    ?: CookieManager.getInstance().getCookie(mediaUrl)
+                    ?: ""
+            } else {
+                CookieManager.getInstance().getCookie(mediaUrl) ?: ""
+            }
         } catch (e: Exception) { "" }
 
         val headers = mutableMapOf(
             "User-Agent" to "Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36",
-            "Referer" to resolvedReferer,
-            "Origin" to origin,
             "Accept" to "*/*",
             "Accept-Language" to "ar,en-US,en;q=0.9"
         )
+        if (resolvedReferer.isNotBlank()) {
+            headers["Referer"] = resolvedReferer
+        }
         if (cookieHeader.isNotBlank()) {
             headers["Cookie"] = cookieHeader
         }
@@ -154,8 +174,8 @@ fun PlayerPane(
             }
     }
 
-    // Prepare media when URL changes
-    LaunchedEffect(mediaUrl, referer) {
+    // Function to reload native stream
+    fun reloadNativeStream() {
         if (mediaUrl.isNotBlank()) {
             playbackError = null
             isBuffering = true
@@ -179,6 +199,16 @@ fun PlayerPane(
         }
     }
 
+    // Prepare media when URL changes
+    LaunchedEffect(mediaUrl, referer) {
+        if (playerEngine == "native") {
+            reloadNativeStream()
+        } else {
+            playbackError = null
+            isBuffering = false
+        }
+    }
+
     // Handle Remote Media Control Command (From Socket.io)
     LaunchedEffect(remoteControlCommand) {
         remoteControlCommand?.let { cmd ->
@@ -186,22 +216,24 @@ fun PlayerPane(
             // Set 1.5-second anti-echo window so local player callbacks don't bounce the event back!
             suppressUntilMs = now + 1500L
 
-            val targetMs = cmd.timeSeconds * 1000L
-            when (cmd.action) {
-                "play" -> {
-                    if (Math.abs(exoPlayer.currentPosition - targetMs) > 2000L) {
+            if (playerEngine == "native") {
+                val targetMs = cmd.timeSeconds * 1000L
+                when (cmd.action) {
+                    "play" -> {
+                        if (Math.abs(exoPlayer.currentPosition - targetMs) > 2000L) {
+                            exoPlayer.seekTo(targetMs)
+                        }
+                        exoPlayer.play()
+                    }
+                    "pause" -> {
+                        if (Math.abs(exoPlayer.currentPosition - targetMs) > 2000L) {
+                            exoPlayer.seekTo(targetMs)
+                        }
+                        exoPlayer.pause()
+                    }
+                    "seek" -> {
                         exoPlayer.seekTo(targetMs)
                     }
-                    exoPlayer.play()
-                }
-                "pause" -> {
-                    if (Math.abs(exoPlayer.currentPosition - targetMs) > 2000L) {
-                        exoPlayer.seekTo(targetMs)
-                    }
-                    exoPlayer.pause()
-                }
-                "seek" -> {
-                    exoPlayer.seekTo(targetMs)
                 }
             }
         }
@@ -211,21 +243,27 @@ fun PlayerPane(
     DisposableEffect(exoPlayer) {
         val listener = object : Player.Listener {
             override fun onPlaybackStateChanged(state: Int) {
-                isBuffering = state == Player.STATE_BUFFERING
-                if (state == Player.STATE_READY) {
-                    val d = exoPlayer.duration
-                    if (d > 0 && d != C.TIME_UNSET) {
-                        durationMs = d
+                if (playerEngine == "native") {
+                    isBuffering = state == Player.STATE_BUFFERING
+                    if (state == Player.STATE_READY) {
+                        val d = exoPlayer.duration
+                        if (d > 0 && d != C.TIME_UNSET) {
+                            durationMs = d
+                        }
                     }
                 }
             }
 
             override fun onIsPlayingChanged(playing: Boolean) {
-                isPlaying = playing
+                if (playerEngine == "native") {
+                    isPlaying = playing
+                }
             }
 
             override fun onPlayerError(error: PlaybackException) {
-                playbackError = "Playback error: ${error.message ?: "Unknown"}"
+                Log.e(TAG, "ExoPlayer error: ${error.errorCodeName} - ${error.message}", error)
+                val detail = error.cause?.message ?: error.message ?: "Source error"
+                playbackError = "Source error: $detail"
                 isBuffering = false
             }
         }
@@ -237,9 +275,9 @@ fun PlayerPane(
         }
     }
 
-    // Periodic time progress tracker
-    LaunchedEffect(isPlaying, exoPlayer) {
-        while (true) {
+    // Periodic time progress tracker for ExoPlayer
+    LaunchedEffect(isPlaying, exoPlayer, playerEngine) {
+        while (playerEngine == "native") {
             if (!isSeekingSlider && exoPlayer.playbackState != Player.STATE_IDLE) {
                 currentPositionMs = exoPlayer.currentPosition
                 val d = exoPlayer.duration
@@ -277,23 +315,45 @@ fun PlayerPane(
                 showControls = !showControls
             }
     ) {
-        // Player Surface View
-        AndroidView(
-            factory = { ctx ->
-                PlayerView(ctx).apply {
-                    player = exoPlayer
-                    useController = false // Custom Jetpack Compose overlay controls
-                    layoutParams = FrameLayout.LayoutParams(
-                        ViewGroup.LayoutParams.MATCH_PARENT,
-                        ViewGroup.LayoutParams.MATCH_PARENT
-                    )
-                }
-            },
-            modifier = Modifier.fillMaxSize()
-        )
+        // ========================================================
+        // 1. ACTIVE PLAYER ENGINE (NATIVE EXOPLAYER vs WEB PLAYER)
+        // ========================================================
+        if (playerEngine == "native") {
+            // Native ExoPlayer Surface
+            AndroidView(
+                factory = { ctx ->
+                    PlayerView(ctx).apply {
+                        player = exoPlayer
+                        useController = false
+                        layoutParams = FrameLayout.LayoutParams(
+                            ViewGroup.LayoutParams.MATCH_PARENT,
+                            ViewGroup.LayoutParams.MATCH_PARENT
+                        )
+                    }
+                },
+                modifier = Modifier.fillMaxSize()
+            )
+        } else {
+            // Hardware-accelerated Synchronized Web Video Player
+            WebPlayerEngine(
+                mediaUrl = mediaUrl,
+                referer = referer,
+                onStateChange = { playing, timeSec ->
+                    isPlaying = playing
+                    currentPositionMs = timeSec * 1000L
+                    dispatchLocalAction(if (playing) "play" else "pause", timeSec)
+                },
+                onSeekChange = { timeSec ->
+                    currentPositionMs = timeSec * 1000L
+                    dispatchLocalAction("seek", timeSec)
+                },
+                remoteControlCommand = remoteControlCommand,
+                modifier = Modifier.fillMaxSize()
+            )
+        }
 
-        // Buffering Indicator
-        if (isBuffering && playbackError == null) {
+        // Buffering Indicator (For Native Engine)
+        if (playerEngine == "native" && isBuffering && playbackError == null) {
             Box(
                 modifier = Modifier
                     .fillMaxSize()
@@ -308,69 +368,152 @@ fun PlayerPane(
             }
         }
 
-        // Error State overlay
-        if (playbackError != null) {
+        // ========================================================
+        // 2. ERROR STATE OVERLAY WITH INSTANT WEB PLAYER RECOVERY
+        // ========================================================
+        if (playbackError != null && playerEngine == "native") {
             Box(
                 modifier = Modifier
                     .fillMaxSize()
-                    .background(Color.Black.copy(alpha = 0.85f))
-                    .padding(16.dp),
+                    .background(Color.Black.copy(alpha = 0.90f))
+                    .padding(20.dp),
                 contentAlignment = Alignment.Center
             ) {
                 Column(
                     horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.Center
+                    verticalArrangement = Arrangement.Center,
+                    modifier = Modifier.fillMaxWidth()
                 ) {
-                    Icon(
-                        imageVector = Icons.Default.Warning,
-                        contentDescription = "Error",
-                        tint = Color(0xFFFF5252),
-                        modifier = Modifier.size(40.dp)
-                    )
-                    Spacer(modifier = Modifier.height(8.dp))
+                    Box(
+                        modifier = Modifier
+                            .size(54.dp)
+                            .clip(CircleShape)
+                            .background(Color(0xFFFF5252).copy(alpha = 0.2f)),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Warning,
+                            contentDescription = "Playback Error",
+                            tint = Color(0xFFFF5252),
+                            modifier = Modifier.size(32.dp)
+                        )
+                    }
+
+                    Spacer(modifier = Modifier.height(12.dp))
+
                     Text(
-                        text = playbackError ?: "Error playing video",
+                        text = "تعذر تشغيل الرابط في المشغل الداخلي",
                         color = Color.White,
-                        fontSize = 13.sp,
-                        fontWeight = FontWeight.Medium
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.Bold,
+                        textAlign = TextAlign.Center
                     )
-                    Spacer(modifier = Modifier.height(14.dp))
+
+                    Spacer(modifier = Modifier.height(4.dp))
+
+                    Text(
+                        text = "سيرفر البث يمنع الاتصال المباشر أو يحتاج لتخطي الحماية. الحل متاح بالأسفل فوراً:",
+                        color = Color.White.copy(alpha = 0.75f),
+                        fontSize = 11.sp,
+                        textAlign = TextAlign.Center,
+                        modifier = Modifier.padding(horizontal = 16.dp)
+                    )
+
+                    Spacer(modifier = Modifier.height(18.dp))
+
+                    // PRIMARY RESCUE: Switch to Web Player (Works with protected / CDN streams!)
+                    Surface(
+                        onClick = {
+                            playbackError = null
+                            playerEngine = "web"
+                        },
+                        shape = RoundedCornerShape(16.dp),
+                        color = Color(0xFF00E676),
+                        shadowElevation = 8.dp,
+                        modifier = Modifier.fillMaxWidth(0.85f).testTag("switch_to_web_player_button")
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.Center,
+                            modifier = Modifier.padding(vertical = 12.dp, horizontal = 16.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Bolt,
+                                contentDescription = "Play via Web Player",
+                                tint = Color.Black,
+                                modifier = Modifier.size(20.dp)
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = "⚡ تشغيل عبر مشغل الويب (Web Player)",
+                                color = Color.Black,
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(10.dp))
+
                     Row(
                         horizontalArrangement = Arrangement.spacedBy(10.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
+                        // Retry Native Player
                         Surface(
                             onClick = {
                                 playbackError = null
                                 isBuffering = true
-                                exoPlayer.prepare()
-                                exoPlayer.play()
+                                reloadNativeStream()
                             },
-                            shape = RoundedCornerShape(16.dp),
-                            color = Color(0xFF00E676)
+                            shape = RoundedCornerShape(14.dp),
+                            color = Color(0xFF26324A)
                         ) {
-                            Text(
-                                text = "إعادة المحاولة (Retry)",
-                                color = Color.Black,
-                                fontSize = 12.sp,
-                                fontWeight = FontWeight.Bold,
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
                                 modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp)
-                            )
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Refresh,
+                                    contentDescription = "Retry",
+                                    tint = Color.White,
+                                    modifier = Modifier.size(14.dp)
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text(
+                                    text = "إعادة المحاولة",
+                                    color = Color.White,
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Medium
+                                )
+                            }
                         }
 
+                        // Host: Switch back to browser to pick another server (Server 2, 3, etc.)
                         if (isHost) {
                             Surface(
                                 onClick = onSwitchToBrowser,
-                                shape = RoundedCornerShape(16.dp),
+                                shape = RoundedCornerShape(14.dp),
                                 color = Color(0xFF6C5CE7)
                             ) {
-                                Text(
-                                    text = "العودة للمتصفح (Browser)",
-                                    color = Color.White,
-                                    fontSize = 12.sp,
-                                    fontWeight = FontWeight.SemiBold,
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
                                     modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp)
-                                )
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Language,
+                                        contentDescription = "Browser",
+                                        tint = Color.White,
+                                        modifier = Modifier.size(14.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text(
+                                        text = "اختيار سيرفر آخر",
+                                        color = Color.White,
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.SemiBold
+                                    )
+                                }
                             }
                         }
                     }
@@ -378,7 +521,9 @@ fun PlayerPane(
             }
         }
 
-        // Custom Media Controls Overlay
+        // ========================================================
+        // 3. TOP BAR & STREAM ENGINE SWITCH CONTROLS
+        // ========================================================
         AnimatedVisibility(
             visible = showControls && playbackError == null,
             enter = fadeIn(),
@@ -391,14 +536,14 @@ fun PlayerPane(
                     .background(
                         Brush.verticalGradient(
                             colors = listOf(
-                                Color.Black.copy(alpha = 0.75f),
+                                Color.Black.copy(alpha = 0.8f),
                                 Color.Transparent,
                                 Color.Black.copy(alpha = 0.85f)
                             )
                         )
                     )
             ) {
-                // Top Bar: Stream Info + Browser Switch (Host only) + Fullscreen
+                // Top Bar: Stream Info + Engine Toggle + Browser Switch + Fullscreen
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -406,26 +551,36 @@ fun PlayerPane(
                         .padding(horizontal = 12.dp, vertical = 8.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
+                    // Engine Switcher Pill (Native vs Web)
                     Surface(
-                        color = Color(0xFF1F293D).copy(alpha = 0.8f),
-                        shape = RoundedCornerShape(12.dp)
+                        onClick = {
+                            playerEngine = if (playerEngine == "native") "web" else "native"
+                            if (playerEngine == "native") reloadNativeStream()
+                        },
+                        color = if (playerEngine == "web") Color(0xFF00E676).copy(alpha = 0.2f) else Color(0xFF1F293D).copy(alpha = 0.85f),
+                        shape = RoundedCornerShape(12.dp),
+                        border = androidx.compose.foundation.BorderStroke(
+                            1.dp,
+                            if (playerEngine == "web") Color(0xFF00E676) else Color(0xFF3F4D6B)
+                        ),
+                        modifier = Modifier.testTag("toggle_player_engine")
                     ) {
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
-                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp)
                         ) {
-                            Box(
-                                modifier = Modifier
-                                    .size(8.dp)
-                                    .clip(CircleShape)
-                                    .background(Color(0xFF00E676))
+                            Icon(
+                                imageVector = if (playerEngine == "web") Icons.Default.Public else Icons.Default.Bolt,
+                                contentDescription = "Engine",
+                                tint = if (playerEngine == "web") Color(0xFF00E676) else Color(0xFF00E5FF),
+                                modifier = Modifier.size(13.dp)
                             )
-                            Spacer(modifier = Modifier.width(6.dp))
+                            Spacer(modifier = Modifier.width(4.dp))
                             Text(
-                                text = "SYNC PLAY",
+                                text = if (playerEngine == "web") "مشغل الويب (Web)" else "المشغل المباشر (Exo)",
                                 fontSize = 10.sp,
                                 fontWeight = FontWeight.Bold,
-                                color = Color(0xFF00E676)
+                                color = if (playerEngine == "web") Color(0xFF00E676) else Color.White
                             )
                         }
                     }
@@ -434,7 +589,7 @@ fun PlayerPane(
 
                     Text(
                         text = title,
-                        fontSize = 13.sp,
+                        fontSize = 12.sp,
                         fontWeight = FontWeight.SemiBold,
                         color = Color.White,
                         maxLines = 1,
@@ -452,159 +607,163 @@ fun PlayerPane(
                         ) {
                             Row(
                                 verticalAlignment = Alignment.CenterVertically,
-                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
+                                modifier = Modifier.padding(horizontal = 9.dp, vertical = 5.dp)
                             ) {
                                 Icon(
                                     imageVector = Icons.Default.Language,
                                     contentDescription = "Browser",
                                     tint = Color.White,
-                                    modifier = Modifier.size(14.dp)
+                                    modifier = Modifier.size(13.dp)
                                 )
                                 Spacer(modifier = Modifier.width(4.dp))
                                 Text(
-                                    text = "Browser",
-                                    fontSize = 11.sp,
+                                    text = "المتصفح",
+                                    fontSize = 10.sp,
                                     fontWeight = FontWeight.Medium,
                                     color = Color.White
                                 )
                             }
                         }
-                    }
-                }
-
-                // Center Controls: Rewind 15s | Play/Pause | Forward 15s
-                Row(
-                    modifier = Modifier.align(Alignment.Center),
-                    horizontalArrangement = Arrangement.spacedBy(28.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    // Rewind 15s
-                    IconButton(
-                        onClick = {
-                            val newPosMs = Math.max(0L, exoPlayer.currentPosition - 15000L)
-                            exoPlayer.seekTo(newPosMs)
-                            currentPositionMs = newPosMs
-                            dispatchLocalAction("seek", newPosMs / 1000L)
-                        },
-                        modifier = Modifier
-                            .size(46.dp)
-                            .clip(CircleShape)
-                            .background(Color.White.copy(alpha = 0.15f))
-                            .testTag("media_rewind_15s_button")
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.FastRewind,
-                            contentDescription = "Rewind 15s",
-                            tint = Color.White,
-                            modifier = Modifier.size(24.dp)
-                        )
+                        Spacer(modifier = Modifier.width(6.dp))
                     }
 
-                    // Play / Pause Toggle
+                    // Fullscreen Toggle
                     IconButton(
-                        onClick = {
-                            if (isPlaying) {
-                                exoPlayer.pause()
-                                dispatchLocalAction("pause", exoPlayer.currentPosition / 1000L)
-                            } else {
-                                exoPlayer.play()
-                                dispatchLocalAction("play", exoPlayer.currentPosition / 1000L)
-                            }
-                        },
-                        modifier = Modifier
-                            .size(64.dp)
-                            .clip(CircleShape)
-                            .background(Color(0xFF6C5CE7))
-                            .testTag("media_play_pause_button")
+                        onClick = onToggleFullscreen,
+                        modifier = Modifier.size(34.dp).testTag("fullscreen_toggle_button")
                     ) {
                         Icon(
-                            imageVector = if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
-                            contentDescription = if (isPlaying) "Pause" else "Play",
+                            imageVector = if (isFullscreen) Icons.Default.FullscreenExit else Icons.Default.Fullscreen,
+                            contentDescription = "Toggle Fullscreen",
                             tint = Color.White,
-                            modifier = Modifier.size(36.dp)
-                        )
-                    }
-
-                    // Forward 15s
-                    IconButton(
-                        onClick = {
-                            val maxMs = if (durationMs > 0) durationMs else Long.MAX_VALUE
-                            val newPosMs = Math.min(maxMs, exoPlayer.currentPosition + 15000L)
-                            exoPlayer.seekTo(newPosMs)
-                            currentPositionMs = newPosMs
-                            dispatchLocalAction("seek", newPosMs / 1000L)
-                        },
-                        modifier = Modifier
-                            .size(46.dp)
-                            .clip(CircleShape)
-                            .background(Color.White.copy(alpha = 0.15f))
-                            .testTag("media_forward_15s_button")
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.FastForward,
-                            contentDescription = "Forward 15s",
-                            tint = Color.White,
-                            modifier = Modifier.size(24.dp)
+                            modifier = Modifier.size(20.dp)
                         )
                     }
                 }
 
-                // Bottom Bar: Progress Slider + Timestamps + Fullscreen
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .align(Alignment.BottomCenter)
-                        .padding(horizontal = 12.dp, vertical = 6.dp)
-                ) {
-                    // Time Slider
-                    if (durationMs > 0) {
+                // Center Controls (For Native ExoPlayer): Rewind 15s | Play/Pause | Forward 15s
+                if (playerEngine == "native") {
+                    Row(
+                        modifier = Modifier.align(Alignment.Center),
+                        horizontalArrangement = Arrangement.spacedBy(28.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        // Rewind 15s
+                        IconButton(
+                            onClick = {
+                                val newPosMs = Math.max(0L, exoPlayer.currentPosition - 15000L)
+                                exoPlayer.seekTo(newPosMs)
+                                currentPositionMs = newPosMs
+                                dispatchLocalAction("seek", newPosMs / 1000L)
+                            },
+                            modifier = Modifier
+                                .size(46.dp)
+                                .clip(CircleShape)
+                                .background(Color.White.copy(alpha = 0.15f))
+                                .testTag("media_rewind_15s_button")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.FastRewind,
+                                contentDescription = "Rewind 15s",
+                                tint = Color.White,
+                                modifier = Modifier.size(24.dp)
+                            )
+                        }
+
+                        // Play / Pause Toggle
+                        IconButton(
+                            onClick = {
+                                if (isPlaying) {
+                                    exoPlayer.pause()
+                                    dispatchLocalAction("pause", exoPlayer.currentPosition / 1000L)
+                                } else {
+                                    exoPlayer.play()
+                                    dispatchLocalAction("play", exoPlayer.currentPosition / 1000L)
+                                }
+                            },
+                            modifier = Modifier
+                                .size(64.dp)
+                                .clip(CircleShape)
+                                .background(Color(0xFF6C5CE7))
+                                .testTag("media_play_pause_button")
+                        ) {
+                            Icon(
+                                imageVector = if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
+                                contentDescription = if (isPlaying) "Pause" else "Play",
+                                tint = Color.White,
+                                modifier = Modifier.size(36.dp)
+                            )
+                        }
+
+                        // Forward 15s
+                        IconButton(
+                            onClick = {
+                                val d = if (durationMs > 0) durationMs else Long.MAX_VALUE
+                                val newPosMs = Math.min(d, exoPlayer.currentPosition + 15000L)
+                                exoPlayer.seekTo(newPosMs)
+                                currentPositionMs = newPosMs
+                                dispatchLocalAction("seek", newPosMs / 1000L)
+                            },
+                            modifier = Modifier
+                                .size(46.dp)
+                                .clip(CircleShape)
+                                .background(Color.White.copy(alpha = 0.15f))
+                                .testTag("media_forward_15s_button")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.FastForward,
+                                contentDescription = "Forward 15s",
+                                tint = Color.White,
+                                modifier = Modifier.size(24.dp)
+                            )
+                        }
+                    }
+
+                    // Bottom Bar: Progress Slider + Timestamp Formatting
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .align(Alignment.BottomCenter)
+                            .padding(horizontal = 14.dp, vertical = 6.dp)
+                    ) {
                         Slider(
-                            value = if (isSeekingSlider) sliderValue else currentPositionMs.toFloat(),
+                            value = if (isSeekingSlider) sliderValue else {
+                                if (durationMs > 0) (currentPositionMs.toFloat() / durationMs.toFloat()).coerceIn(0f, 1f) else 0f
+                            },
                             onValueChange = { newValue ->
                                 isSeekingSlider = true
                                 sliderValue = newValue
                             },
                             onValueChangeFinished = {
                                 isSeekingSlider = false
-                                val targetMs = sliderValue.toLong()
+                                val targetMs = (sliderValue * durationMs).toLong()
                                 exoPlayer.seekTo(targetMs)
                                 currentPositionMs = targetMs
                                 dispatchLocalAction("seek", targetMs / 1000L)
                             },
-                            valueRange = 0f..durationMs.toFloat(),
                             colors = SliderDefaults.colors(
                                 thumbColor = Color(0xFF6C5CE7),
                                 activeTrackColor = Color(0xFF6C5CE7),
                                 inactiveTrackColor = Color.White.copy(alpha = 0.25f)
                             ),
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .height(22.dp)
-                                .testTag("media_time_slider")
-                        )
-                    }
-
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text(
-                            text = "${formatTime(currentPositionMs)} / ${formatTime(durationMs)}",
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.Medium,
-                            color = Color.White.copy(alpha = 0.85f)
+                            modifier = Modifier.fillMaxWidth().height(20.dp).testTag("media_scrubber_slider")
                         )
 
-                        IconButton(
-                            onClick = onToggleFullscreen,
-                            modifier = Modifier.size(32.dp).testTag("fullscreen_toggle_button")
+                        Row(
+                            modifier = Modifier.fillMaxWidth().padding(top = 2.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween
                         ) {
-                            Icon(
-                                imageVector = if (isFullscreen) Icons.Default.FullscreenExit else Icons.Default.Fullscreen,
-                                contentDescription = "Fullscreen",
-                                tint = Color.White,
-                                modifier = Modifier.size(20.dp)
+                            Text(
+                                text = formatTime(currentPositionMs),
+                                fontSize = 11.sp,
+                                color = Color.White.copy(alpha = 0.85f),
+                                fontWeight = FontWeight.Medium
+                            )
+                            Text(
+                                text = if (durationMs > 0) formatTime(durationMs) else "--:--",
+                                fontSize = 11.sp,
+                                color = Color.White.copy(alpha = 0.85f),
+                                fontWeight = FontWeight.Medium
                             )
                         }
                     }
@@ -615,90 +774,172 @@ fun PlayerPane(
 }
 
 /**
- * Guest placeholder waiting for the host to select/sniff a video
+ * Embedded Hardware-Accelerated Web Video Player
+ * Runs inside standard Android WebView possessing all browser cookies, origin,
+ * and Hls.js runtime. This guarantees playback even for CDNs that block direct ExoPlayer HTTP calls.
  */
+@SuppressLint("SetJavaScriptEnabled")
 @Composable
-fun GuestWaitingPane(
+private fun WebPlayerEngine(
+    mediaUrl: String,
+    referer: String,
+    onStateChange: (isPlaying: Boolean, timeSec: Long) -> Unit,
+    onSeekChange: (timeSec: Long) -> Unit,
+    remoteControlCommand: RemoteMediaControl?,
     modifier: Modifier = Modifier
 ) {
-    Box(
+    var webViewRef by remember { mutableStateOf<WebView?>(null) }
+
+    // Respond to remote synchronization commands
+    LaunchedEffect(remoteControlCommand) {
+        remoteControlCommand?.let { cmd ->
+            val sec = cmd.timeSeconds
+            val script = when (cmd.action) {
+                "play" -> """
+                    (function() {
+                        var v = document.querySelector('video');
+                        if (v) {
+                            if (Math.abs(v.currentTime - $sec) > 2) v.currentTime = $sec;
+                            v.play().catch(function(){});
+                        }
+                    })();
+                """.trimIndent()
+                "pause" -> """
+                    (function() {
+                        var v = document.querySelector('video');
+                        if (v) {
+                            v.currentTime = $sec;
+                            v.pause();
+                        }
+                    })();
+                """.trimIndent()
+                "seek" -> """
+                    (function() {
+                        var v = document.querySelector('video');
+                        if (v) {
+                            v.currentTime = $sec;
+                        }
+                    })();
+                """.trimIndent()
+                else -> ""
+            }
+            if (script.isNotBlank()) {
+                webViewRef?.evaluateJavascript(script, null)
+            }
+        }
+    }
+
+    AndroidView(
+        factory = { ctx ->
+            WebView(ctx).apply {
+                webViewRef = this
+                setBackgroundColor(android.graphics.Color.BLACK)
+
+                CookieManager.getInstance().setAcceptCookie(true)
+                CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
+
+                settings.apply {
+                    javaScriptEnabled = true
+                    domStorageEnabled = true
+                    mediaPlaybackRequiresUserGesture = false
+                    allowFileAccess = true
+                    mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
+                    useWideViewPort = true
+                    loadWithOverviewMode = true
+                }
+
+                webChromeClient = WebChromeClient()
+                webViewClient = object : WebViewClient() {
+                    override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
+                        return false
+                    }
+                }
+
+                addJavascriptInterface(object {
+                    @JavascriptInterface
+                    fun onPlay(timeSec: Long) {
+                        onStateChange(true, timeSec)
+                    }
+
+                    @JavascriptInterface
+                    fun onPause(timeSec: Long) {
+                        onStateChange(false, timeSec)
+                    }
+
+                    @JavascriptInterface
+                    fun onSeeked(timeSec: Long) {
+                        onSeekChange(timeSec)
+                    }
+                }, "AndroidBridge")
+
+                val html = """
+                    <!DOCTYPE html>
+                    <html dir="ltr">
+                    <head>
+                    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+                    <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.8/dist/hls.min.js"></script>
+                    <style>
+                      * { box-sizing: border-box; margin: 0; padding: 0; }
+                      html, body { width: 100%; height: 100%; background: #000; overflow: hidden; display: flex; align-items: center; justify-content: center; }
+                      video { width: 100%; height: 100%; max-height: 100vh; object-fit: contain; background: #000; }
+                    </style>
+                    </head>
+                    <body>
+                    <video id="player" controls playsinline autoplay></video>
+                    <script>
+                      var v = document.getElementById('player');
+                      var src = '$mediaUrl';
+                      if (src.indexOf('.m3u8') !== -1 && typeof Hls !== 'undefined' && Hls.isSupported()) {
+                        var hls = new Hls({ enableWorker: true, lowLatencyMode: false });
+                        hls.loadSource(src);
+                        hls.attachMedia(v);
+                        hls.on(Hls.Events.MANIFEST_PARSED, function() {
+                          v.play().catch(function(e){});
+                        });
+                      } else {
+                        v.src = src;
+                        v.play().catch(function(e){});
+                      }
+
+                      v.addEventListener('play', function() {
+                        if (window.AndroidBridge) AndroidBridge.onPlay(Math.floor(v.currentTime));
+                      });
+                      v.addEventListener('pause', function() {
+                        if (window.AndroidBridge) AndroidBridge.onPause(Math.floor(v.currentTime));
+                      });
+                      v.addEventListener('seeked', function() {
+                        if (window.AndroidBridge) AndroidBridge.onSeeked(Math.floor(v.currentTime));
+                      });
+                    </script>
+                    </body>
+                    </html>
+                """.trimIndent()
+
+                loadDataWithBaseURL(
+                    if (referer.isNotBlank()) referer else mediaUrl,
+                    html,
+                    "text/html",
+                    "UTF-8",
+                    null
+                )
+            }
+        },
         modifier = modifier
-            .fillMaxSize()
-            .background(
-                Brush.verticalGradient(
-                    colors = listOf(Color(0xFF0F1424), Color(0xFF080A12))
-                )
-            )
-            .padding(24.dp),
-        contentAlignment = Alignment.Center
-    ) {
-        Column(
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.Center
-        ) {
-            Box(
-                modifier = Modifier
-                    .size(68.dp)
-                    .clip(CircleShape)
-                    .background(Color(0xFF1E263D)),
-                contentAlignment = Alignment.Center
-            ) {
-                Icon(
-                    imageVector = Icons.Default.Tv,
-                    contentDescription = "Waiting for host",
-                    tint = Color(0xFF6C5CE7),
-                    modifier = Modifier.size(36.dp)
-                )
-            }
+    )
 
-            Spacer(modifier = Modifier.height(16.dp))
-
-            Text(
-                text = "Waiting for Host to Pick a Video...",
-                fontSize = 16.sp,
-                fontWeight = FontWeight.SemiBold,
-                color = Color.White
-            )
-
-            Spacer(modifier = Modifier.height(6.dp))
-
-            Text(
-                text = "The host is browsing movies. Playback will start automatically for everyone in pristine native quality!",
-                fontSize = 12.sp,
-                color = Color.White.copy(alpha = 0.6f),
-                lineHeight = 16.sp,
-                modifier = Modifier.padding(horizontal = 16.dp),
-                textAlign = androidx.compose.ui.text.style.TextAlign.Center
-            )
-
-            Spacer(modifier = Modifier.height(20.dp))
-
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                CircularProgressIndicator(
-                    color = Color(0xFF6C5CE7),
-                    strokeWidth = 2.5.dp,
-                    modifier = Modifier.size(18.dp)
-                )
-                Text(
-                    text = "Sync standby active",
-                    fontSize = 12.sp,
-                    color = Color(0xFF6C5CE7),
-                    fontWeight = FontWeight.Medium
-                )
-            }
+    DisposableEffect(Unit) {
+        onDispose {
+            webViewRef?.destroy()
         }
     }
 }
 
-fun formatTime(timeMs: Long): String {
-    if (timeMs <= 0) return "00:00"
-    val totalSeconds = timeMs / 1000
-    val seconds = totalSeconds % 60
-    val minutes = (totalSeconds / 60) % 60
+private fun formatTime(millis: Long): String {
+    val totalSeconds = Math.max(0L, millis / 1000L)
     val hours = totalSeconds / 3600
+    val minutes = (totalSeconds % 3600) / 60
+    val seconds = totalSeconds % 60
+
     return if (hours > 0) {
         String.format(Locale.US, "%d:%02d:%02d", hours, minutes, seconds)
     } else {

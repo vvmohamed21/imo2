@@ -1,15 +1,10 @@
 package com.example
 
-import android.app.DownloadManager
-import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
-import android.content.IntentFilter
 import android.net.Uri
 import android.os.Build
 import android.os.Environment
-import android.os.Handler
-import android.os.Looper
 import android.provider.Settings
 import android.util.Log
 import android.widget.Toast
@@ -17,11 +12,9 @@ import androidx.core.content.FileProvider
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
@@ -74,7 +67,39 @@ class UpdateManager(private val context: Context) {
     val downloadProgress: StateFlow<Int> = _downloadProgress.asStateFlow()
 
     private var downloadedApkFile: File? = null
-    private var downloadId: Long = -1L
+
+    /**
+     * Purges all old/previous APK update files from cache and download directories
+     * so that only the latest update exists and storage is kept clean.
+     */
+    fun cleanOldUpdates() {
+        try {
+            val dirsToClean = listOfNotNull(
+                context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS),
+                context.cacheDir,
+                context.externalCacheDir,
+                File(context.filesDir, "updates")
+            )
+
+            for (dir in dirsToClean) {
+                if (dir.exists() && dir.isDirectory) {
+                    val files = dir.listFiles { file ->
+                        file.isFile && (file.extension.equals("apk", ignoreCase = true) || file.name.startsWith("watchroom"))
+                    }
+                    files?.forEach { f ->
+                        try {
+                            f.delete()
+                            Log.d("UpdateManager", "Deleted previous update file: ${f.name}")
+                        } catch (e: Exception) {
+                            Log.w("UpdateManager", "Could not delete: ${f.name}", e)
+                        }
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            Log.e("UpdateManager", "Error while cleaning old update files", e)
+        }
+    }
 
     /**
      * Current installed version code
@@ -113,7 +138,7 @@ class UpdateManager(private val context: Context) {
     }
 
     /**
-     * Check server for updates
+     * Check server for updates. If up to date, purges any leftover APKs.
      */
     suspend fun checkForUpdates(serverBaseUrl: String): Boolean = withContext(Dispatchers.IO) {
         _status.value = UpdateCheckStatus.CHECKING
@@ -125,13 +150,14 @@ class UpdateManager(private val context: Context) {
         try {
             val request = Request.Builder()
                 .url(endpoint)
+                .header("Cache-Control", "no-cache, no-store")
                 .get()
                 .build()
 
             val response = client.newCall(request).execute()
             if (!response.isSuccessful) {
                 _status.value = UpdateCheckStatus.ERROR
-                _errorMessage.value = "HTTP ${response.code}: Failed to query version endpoint"
+                _errorMessage.value = "HTTP ${response.code}: فشل التحقق من التحديثات"
                 return@withContext false
             }
 
@@ -161,6 +187,8 @@ class UpdateManager(private val context: Context) {
                 _status.value = UpdateCheckStatus.UPDATE_AVAILABLE
                 return@withContext true
             } else {
+                // If user is already on latest version, clean any residual APKs immediately
+                cleanOldUpdates()
                 _status.value = UpdateCheckStatus.UP_TO_DATE
                 return@withContext false
             }
@@ -173,8 +201,8 @@ class UpdateManager(private val context: Context) {
     }
 
     /**
-     * Trigger APK Download using robust Coroutine Direct Download into App-specific Cache/Files
-     * This avoids DownloadManager permission or path issues completely.
+     * Starts APK Download directly to internal/external app storage,
+     * first clearing ALL older versions so only the latest update is kept.
      */
     fun startDownload(apkUrl: String) {
         scope.launch {
@@ -182,6 +210,12 @@ class UpdateManager(private val context: Context) {
             _downloadProgress.value = 5
             _errorMessage.value = null
 
+            // 1. Delete all previous update files to prevent clutter and conflicts
+            withContext(Dispatchers.IO) {
+                cleanOldUpdates()
+            }
+
+            // 2. Download the single latest APK
             val success = withContext(Dispatchers.IO) {
                 downloadDirectly(apkUrl)
             }
@@ -189,12 +223,12 @@ class UpdateManager(private val context: Context) {
             if (success && downloadedApkFile != null && downloadedApkFile!!.exists()) {
                 _status.value = UpdateCheckStatus.READY_TO_INSTALL
                 _downloadProgress.value = 100
-                Toast.makeText(context, "تم تحميل التحديث بنجاح. جاري فتح التثبيت...", Toast.LENGTH_SHORT).show()
+                Toast.makeText(context, "تم تحميل أحدث إصدار بنجاح. جاري فتح التثبيت...", Toast.LENGTH_SHORT).show()
                 installApk(downloadedApkFile)
             } else {
                 _status.value = UpdateCheckStatus.ERROR
                 if (_errorMessage.value == null) {
-                    _errorMessage.value = "فشل تحميل ملف التحديث، يرجى التحقق من الاتصال."
+                    _errorMessage.value = "فشل تحميل ملف التحديث، يرجى المحاولة مرة أخرى أو التنزيل عبر المتصفح."
                 }
             }
         }
@@ -204,8 +238,8 @@ class UpdateManager(private val context: Context) {
         var inputStream: InputStream? = null
         var outputStream: FileOutputStream? = null
         try {
-            val fileName = "watchroom_v${_updateInfo.value?.versionName ?: "latest"}.apk"
-            // Use getExternalFilesDir or cacheDir (both covered by FileProvider)
+            // Keep a single, unified file name for the latest update
+            val fileName = "watchroom_latest_update.apk"
             val downloadDir = context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS) ?: context.cacheDir
             if (!downloadDir.exists()) {
                 downloadDir.mkdirs()
@@ -255,7 +289,6 @@ class UpdateManager(private val context: Context) {
                 return false
             }
 
-            // Ensure destination is readable
             destination.setReadable(true, false)
             downloadedApkFile = destination
             return true
@@ -274,18 +307,18 @@ class UpdateManager(private val context: Context) {
      */
     fun installApk(file: File? = downloadedApkFile) {
         val targetFile = file ?: downloadedApkFile
-        if (targetFile == null || !targetFile.exists()) {
+        if (targetFile == null || !targetFile.exists() || targetFile.length() < 1000) {
             _errorMessage.value = "ملف التثبيت (APK) غير موجود، يرجى إعادة التحميل"
-            Toast.makeText(context, "ملف التثبيت غير موجود", Toast.LENGTH_LONG).show()
+            Toast.makeText(context, "ملف التثبيت غير موجود، يرجى إعادة التحميل", Toast.LENGTH_LONG).show()
             return
         }
 
-        // On Android 8.0+ (API 26+), check if app can install unknown apps
+        // On Android 8.0+ (API 26+), verify if app can request package installs
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             if (!context.packageManager.canRequestPackageInstalls()) {
                 Toast.makeText(
                     context,
-                    "يرجى السماح للتطبيق بتثبيت التطبيقات من هذا المصدر",
+                    "يرجى السماح للتطبيق بتثبيت التطبيقات ثم الضغط على تثبيت مرة أخرى",
                     Toast.LENGTH_LONG
                 ).show()
                 try {
@@ -320,7 +353,6 @@ class UpdateManager(private val context: Context) {
                         Intent.FLAG_ACTIVITY_CLEAR_TOP
             }
 
-            // Grant temporary read permission explicitly to potential package installers
             val resInfoList = context.packageManager.queryIntentActivities(
                 intent,
                 android.content.pm.PackageManager.MATCH_DEFAULT_ONLY
@@ -334,11 +366,28 @@ class UpdateManager(private val context: Context) {
                 )
             }
 
+            Toast.makeText(context, "جاري فتح مثبت الحزم...", Toast.LENGTH_SHORT).show()
             context.startActivity(intent)
         } catch (e: Exception) {
             Log.e("UpdateManager", "Failed to launch installer", e)
-            _errorMessage.value = "تعذر فتح مثبت الحزم: ${e.localizedMessage}"
-            Toast.makeText(context, "تعذر فتح مثبت الحزم: ${e.localizedMessage}", Toast.LENGTH_LONG).show()
+            _errorMessage.value = "تعذر فتح مثبت الحزم: ${e.localizedMessage}. يمكنك التحميل المباشر من المتصفح."
+            Toast.makeText(context, "تعذر فتح مثبت الحزم، جاري فتح الرابط في المتصفح...", Toast.LENGTH_LONG).show()
+            openInBrowser()
+        }
+    }
+
+    /**
+     * Fallback: open browser download URL directly so the user is never stuck
+     */
+    fun openInBrowser(fallbackUrl: String? = null) {
+        try {
+            val url = fallbackUrl ?: _updateInfo.value?.apkUrl ?: "${AppConfig.DEFAULT_CLOUD_SERVER_URL}/download"
+            val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url)).apply {
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK
+            }
+            context.startActivity(intent)
+        } catch (e: Exception) {
+            Log.e("UpdateManager", "Failed to open browser for download", e)
         }
     }
 

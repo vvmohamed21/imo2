@@ -116,16 +116,34 @@ app.get('/download', (req, res) => {
   }
 });
 
-// In-App Self Update Endpoint
+// Clean up any stale or duplicate APK files in public/ to ensure only the latest single update is kept
+try {
+  const publicDir = path.join(__dirname, 'public');
+  if (fs.existsSync(publicDir)) {
+    const files = fs.readdirSync(publicDir);
+    for (const f of files) {
+      if (f.endsWith('.apk') && f !== 'watchroom.apk' && f !== 'app-debug.apk') {
+        fs.unlinkSync(path.join(publicDir, f));
+        console.log(`Deleted stale public APK: ${f}`);
+      }
+    }
+  }
+} catch (e) {
+  console.warn('Could not clean old APKs:', e);
+}
+
+// In-App Self Update Endpoint (Direct jump to latest version for all older users)
 app.get('/api/version', (req, res) => {
   const host = req.get('host');
   const protocol = req.protocol === 'https' || req.get('x-forwarded-proto') === 'https' ? 'https' : 'http';
   res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+  res.setHeader('Pragma', 'no-cache');
+  res.setHeader('Expires', '0');
   res.json({
-    versionCode: 2,
-    versionName: "1.0.1",
+    versionCode: 3,
+    versionName: "1.0.2",
     apkUrl: `${protocol}://${host}/download`,
-    changelog: "أحدث إصدار: دعم السيرفر السحابي، إزالة archive.org، متصفح ايجي بست وكيو فيلم، وإصلاح التثبيت التلقائي.",
+    changelog: "تحديث شامل ونهائي: الترقية مباشرة إلى أحدث إصدار مرة واحدة، مع مسح جميع التحديثات القديمة تلقائياً من جهازك لمنع التكرار وتوفير المساحة.",
     forceUpdate: false
   });
 });

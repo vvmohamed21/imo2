@@ -217,8 +217,11 @@ class VideoSnifferClient(
 
         // Sniff media stream
         if (isMediaUrl(url)) {
-            Log.i(TAG, "Sniffed stream from network request: $url")
-            notifyMediaCaptured(url)
+            val reqReferer = request?.requestHeaders?.get("Referer")
+                ?: request?.requestHeaders?.get("referer")
+                ?: currentPageUrl
+            Log.i(TAG, "Sniffed stream from network request: $url (referer: $reqReferer)")
+            notifyMediaCaptured(url, reqReferer)
         }
 
         return super.shouldInterceptRequest(view, request)
@@ -296,11 +299,11 @@ class VideoSnifferClient(
         view?.evaluateJavascript(jsInjection, null)
     }
 
-    private fun notifyMediaCaptured(url: String) {
+    private fun notifyMediaCaptured(url: String, referer: String = currentPageUrl) {
         if (lastCapturedUrl == url) return
         lastCapturedUrl = url
         mainHandler.post {
-            onMediaDetected(url, currentPageUrl)
+            onMediaDetected(url, referer)
         }
     }
 }

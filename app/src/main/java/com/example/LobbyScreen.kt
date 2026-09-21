@@ -242,8 +242,22 @@ fun LobbyScreen(
 
                     Row(
                         modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.End
+                        horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End),
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
+                        Surface(
+                            onClick = { updateManager?.openInBrowser() },
+                            color = Color.White.copy(alpha = 0.1f),
+                            shape = RoundedCornerShape(10.dp)
+                        ) {
+                            Text(
+                                text = "تنزيل من المتصفح",
+                                color = Color.White.copy(alpha = 0.85f),
+                                fontSize = 11.sp,
+                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp)
+                            )
+                        }
+
                         Button(
                             onClick = {
                                 updateInfo?.apkUrl?.let { url ->
@@ -262,9 +276,9 @@ fun LobbyScreen(
                             )
                             Spacer(modifier = Modifier.width(6.dp))
                             Text(
-                                text = "Update Now",
+                                text = "تحديث فوري (مرة واحدة)",
                                 color = Color.Black,
-                                fontSize = 12.sp,
+                                fontSize = 11.sp,
                                 fontWeight = FontWeight.Bold
                             )
                         }
@@ -287,7 +301,7 @@ fun LobbyScreen(
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Text(
-                            text = "جاري تحميل التحديث ($downloadProgress%)...",
+                            text = "جاري تحميل أحدث إصدار ($downloadProgress%)...",
                             fontSize = 12.sp,
                             fontWeight = FontWeight.SemiBold,
                             color = Color.White
@@ -323,24 +337,37 @@ fun LobbyScreen(
                 ) {
                     Column(modifier = Modifier.weight(1f)) {
                         Text(
-                            text = "تم تحميل التحديث بنجاح!",
+                            text = "تم تحميل أحدث إصدار بنجاح!",
                             fontSize = 12.sp,
                             color = Color(0xFF00E676),
                             fontWeight = FontWeight.SemiBold
                         )
                         Text(
-                            text = "اضغط على تثبيت للمتابعة",
+                            text = "تم حذف كل التحديثات السابقة. اضغط تثبيت",
                             fontSize = 10.sp,
                             color = Color.White.copy(alpha = 0.7f)
                         )
                     }
-                    Button(
-                        onClick = { updateManager?.installApk() },
-                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF00E676)),
-                        shape = RoundedCornerShape(10.dp),
-                        modifier = Modifier.height(34.dp)
-                    ) {
-                        Text("تثبيت (Install)", color = Color.Black, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Button(
+                            onClick = { updateManager?.installApk() },
+                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF00E676)),
+                            shape = RoundedCornerShape(10.dp),
+                            modifier = Modifier.height(34.dp)
+                        ) {
+                            Text("تثبيت (Install)", color = Color.Black, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                        }
+                        IconButton(
+                            onClick = { updateManager?.openInBrowser() },
+                            modifier = Modifier.size(34.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Download,
+                                contentDescription = "Download directly",
+                                tint = Color.White.copy(alpha = 0.7f),
+                                modifier = Modifier.size(16.dp)
+                            )
+                        }
                     }
                 }
             }
@@ -360,28 +387,24 @@ fun LobbyScreen(
                 ) {
                     Column(modifier = Modifier.weight(1f)) {
                         Text(
-                            text = "تعذر إكمال التحديث",
+                            text = "تعذر التحديث التلقائي",
                             fontSize = 12.sp,
                             color = Color(0xFFFF5252),
                             fontWeight = FontWeight.Bold
                         )
                         Text(
-                            text = updateError ?: "",
+                            text = updateError ?: "خطأ أثناء التحديث",
                             fontSize = 10.sp,
-                            color = Color.White.copy(alpha = 0.8f)
+                            color = Color.White.copy(alpha = 0.7f)
                         )
                     }
                     Button(
-                        onClick = {
-                            updateInfo?.apkUrl?.let { url ->
-                                updateManager?.startDownload(url)
-                            }
-                        },
+                        onClick = { updateManager?.openInBrowser() },
                         colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFFF5252)),
                         shape = RoundedCornerShape(10.dp),
                         modifier = Modifier.height(32.dp)
                     ) {
-                        Text("إعادة المحاولة", color = Color.White, fontSize = 10.sp)
+                        Text("تحميل عبر المتصفح", color = Color.White, fontSize = 10.sp, fontWeight = FontWeight.Bold)
                     }
                 }
             }
