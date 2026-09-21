@@ -124,3 +124,14 @@ dependencies {
   "ksp"(libs.androidx.room.compiler)
   "ksp"(libs.moshi.kotlin.codegen)
 }
+
+// Automatically ensure public/watchroom.apk is always updated with the freshest compiled APK
+tasks.register<Copy>("copyApkToPublic") {
+  from(layout.buildDirectory.file("outputs/apk/debug/app-debug.apk"))
+  into(rootProject.file("public"))
+  rename { "watchroom.apk" }
+}
+
+tasks.matching { it.name == "assembleDebug" }.configureEach {
+  finalizedBy("copyApkToPublic")
+}

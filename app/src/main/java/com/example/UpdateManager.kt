@@ -8,17 +8,28 @@ import android.content.IntentFilter
 import android.net.Uri
 import android.os.Build
 import android.os.Environment
+import android.os.Handler
+import android.os.Looper
+import android.provider.Settings
 import android.util.Log
+import android.widget.Toast
 import androidx.core.content.FileProvider
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONObject
 import java.io.File
+import java.io.FileOutputStream
+import java.io.InputStream
 import java.util.concurrent.TimeUnit
 
 data class AppUpdateInfo(
@@ -42,9 +53,13 @@ enum class UpdateCheckStatus {
 class UpdateManager(private val context: Context) {
 
     private val client = OkHttpClient.Builder()
-        .connectTimeout(10, TimeUnit.SECONDS)
-        .readTimeout(15, TimeUnit.SECONDS)
+        .connectTimeout(15, TimeUnit.SECONDS)
+        .readTimeout(60, TimeUnit.SECONDS)
+        .followRedirects(true)
+        .followSslRedirects(true)
         .build()
+
+    private val scope = CoroutineScope(Dispatchers.Main + Job())
 
     private val _status = MutableStateFlow(UpdateCheckStatus.IDLE)
     val status: StateFlow<UpdateCheckStatus> = _status.asStateFlow()
@@ -125,7 +140,10 @@ class UpdateManager(private val context: Context) {
 
             val remoteCode = json.optInt("versionCode", 1)
             val remoteName = json.optString("versionName", "1.0")
-            val apkUrl = json.optString("apkUrl", "")
+            var apkUrl = json.optString("apkUrl", "")
+            if (apkUrl.startsWith("/")) {
+                apkUrl = "$cleanBase$apkUrl"
+            }
             val changelog = json.optString("changelog", "")
             val force = json.optBoolean("forceUpdate", false)
 
@@ -155,64 +173,99 @@ class UpdateManager(private val context: Context) {
     }
 
     /**
-     * Trigger APK Download using DownloadManager or internal storage
+     * Trigger APK Download using robust Coroutine Direct Download into App-specific Cache/Files
+     * This avoids DownloadManager permission or path issues completely.
      */
     fun startDownload(apkUrl: String) {
-        try {
+        scope.launch {
             _status.value = UpdateCheckStatus.DOWNLOADING
-            _downloadProgress.value = 10
+            _downloadProgress.value = 5
+            _errorMessage.value = null
 
-            val uri = Uri.parse(apkUrl)
-            val downloadManager = context.getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
+            val success = withContext(Dispatchers.IO) {
+                downloadDirectly(apkUrl)
+            }
 
+            if (success && downloadedApkFile != null && downloadedApkFile!!.exists()) {
+                _status.value = UpdateCheckStatus.READY_TO_INSTALL
+                _downloadProgress.value = 100
+                Toast.makeText(context, "تم تحميل التحديث بنجاح. جاري فتح التثبيت...", Toast.LENGTH_SHORT).show()
+                installApk(downloadedApkFile)
+            } else {
+                _status.value = UpdateCheckStatus.ERROR
+                if (_errorMessage.value == null) {
+                    _errorMessage.value = "فشل تحميل ملف التحديث، يرجى التحقق من الاتصال."
+                }
+            }
+        }
+    }
+
+    private fun downloadDirectly(apkUrl: String): Boolean {
+        var inputStream: InputStream? = null
+        var outputStream: FileOutputStream? = null
+        try {
             val fileName = "watchroom_v${_updateInfo.value?.versionName ?: "latest"}.apk"
-            val destination = File(context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS), fileName)
+            // Use getExternalFilesDir or cacheDir (both covered by FileProvider)
+            val downloadDir = context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS) ?: context.cacheDir
+            if (!downloadDir.exists()) {
+                downloadDir.mkdirs()
+            }
+            val destination = File(downloadDir, fileName)
             if (destination.exists()) {
                 destination.delete()
             }
-            downloadedApkFile = destination
 
-            val request = DownloadManager.Request(uri).apply {
-                setTitle("WatchRoom Update")
-                setDescription("Downloading WatchRoom v${_updateInfo.value?.versionName ?: ""}")
-                setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
-                setDestinationUri(Uri.fromFile(destination))
-                setAllowedOverMetered(true)
-                setAllowedOverRoaming(true)
+            val request = Request.Builder()
+                .url(apkUrl)
+                .header("User-Agent", "WatchRoom-Android/${getCurrentVersionName()}")
+                .build()
+
+            val response = client.newCall(request).execute()
+            if (!response.isSuccessful) {
+                _errorMessage.value = "فشل الاتصال بسيرفر التحديث: HTTP ${response.code}"
+                return false
             }
 
-            downloadId = downloadManager.enqueue(request)
+            val body = response.body ?: return false
+            val contentLength = body.contentLength()
+            inputStream = body.byteStream()
+            outputStream = FileOutputStream(destination)
 
-            val onComplete = object : BroadcastReceiver() {
-                override fun onReceive(ctxt: Context?, intent: Intent?) {
-                    val id = intent?.getLongExtra(DownloadManager.EXTRA_DOWNLOAD_ID, -1) ?: -1
-                    if (id == downloadId) {
-                        _status.value = UpdateCheckStatus.READY_TO_INSTALL
-                        _downloadProgress.value = 100
-                        try {
-                            context.unregisterReceiver(this)
-                        } catch (_: Exception) {}
-                        installApk(destination)
+            val buffer = ByteArray(8 * 1024)
+            var bytesRead: Int
+            var totalRead = 0L
+            var lastProgressReport = 0
+
+            while (inputStream.read(buffer).also { bytesRead = it } != -1) {
+                outputStream.write(buffer, 0, bytesRead)
+                totalRead += bytesRead
+                if (contentLength > 0) {
+                    val progress = ((totalRead * 100) / contentLength).toInt()
+                    if (progress - lastProgressReport >= 2) {
+                        lastProgressReport = progress
+                        _downloadProgress.value = progress.coerceIn(5, 99)
                     }
                 }
             }
+            outputStream.flush()
 
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                context.registerReceiver(
-                    onComplete,
-                    IntentFilter(DownloadManager.ACTION_DOWNLOAD_COMPLETE),
-                    Context.RECEIVER_EXPORTED
-                )
-            } else {
-                context.registerReceiver(
-                    onComplete,
-                    IntentFilter(DownloadManager.ACTION_DOWNLOAD_COMPLETE)
-                )
+            if (destination.length() < 1000) {
+                _errorMessage.value = "ملف التحديث غير مكتمل (${destination.length()} بايت)"
+                destination.delete()
+                return false
             }
+
+            // Ensure destination is readable
+            destination.setReadable(true, false)
+            downloadedApkFile = destination
+            return true
         } catch (e: Exception) {
-            Log.e("UpdateManager", "Failed to start download", e)
-            _status.value = UpdateCheckStatus.ERROR
-            _errorMessage.value = "Failed to start download: ${e.localizedMessage}"
+            Log.e("UpdateManager", "Direct download failed", e)
+            _errorMessage.value = "خطأ أثناء التحميل: ${e.localizedMessage}"
+            return false
+        } finally {
+            try { inputStream?.close() } catch (_: Exception) {}
+            try { outputStream?.close() } catch (_: Exception) {}
         }
     }
 
@@ -220,27 +273,72 @@ class UpdateManager(private val context: Context) {
      * Launch Package Installer for downloaded APK
      */
     fun installApk(file: File? = downloadedApkFile) {
-        val targetFile = file ?: downloadedApkFile ?: return
-        if (!targetFile.exists()) {
-            _errorMessage.value = "APK file not found"
+        val targetFile = file ?: downloadedApkFile
+        if (targetFile == null || !targetFile.exists()) {
+            _errorMessage.value = "ملف التثبيت (APK) غير موجود، يرجى إعادة التحميل"
+            Toast.makeText(context, "ملف التثبيت غير موجود", Toast.LENGTH_LONG).show()
             return
         }
 
+        // On Android 8.0+ (API 26+), check if app can install unknown apps
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            if (!context.packageManager.canRequestPackageInstalls()) {
+                Toast.makeText(
+                    context,
+                    "يرجى السماح للتطبيق بتثبيت التطبيقات من هذا المصدر",
+                    Toast.LENGTH_LONG
+                ).show()
+                try {
+                    val intent = Intent(
+                        Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                        Uri.parse("package:${context.packageName}")
+                    ).apply {
+                        flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                    }
+                    context.startActivity(intent)
+                } catch (e: Exception) {
+                    Log.e("UpdateManager", "Failed to open install permission settings", e)
+                }
+                return
+            }
+        }
+
         try {
+            val authority = "${context.packageName}.provider"
             val contentUri = FileProvider.getUriForFile(
                 context,
-                "${context.packageName}.provider",
+                authority,
                 targetFile
             )
 
+            Log.i("UpdateManager", "Launching installer with URI: $contentUri from $targetFile")
+
             val intent = Intent(Intent.ACTION_VIEW).apply {
                 setDataAndType(contentUri, "application/vnd.android.package-archive")
-                flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_GRANT_READ_URI_PERMISSION
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK or 
+                        Intent.FLAG_GRANT_READ_URI_PERMISSION or
+                        Intent.FLAG_ACTIVITY_CLEAR_TOP
             }
+
+            // Grant temporary read permission explicitly to potential package installers
+            val resInfoList = context.packageManager.queryIntentActivities(
+                intent,
+                android.content.pm.PackageManager.MATCH_DEFAULT_ONLY
+            )
+            for (resolveInfo in resInfoList) {
+                val packageName = resolveInfo.activityInfo.packageName
+                context.grantUriPermission(
+                    packageName,
+                    contentUri,
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION
+                )
+            }
+
             context.startActivity(intent)
         } catch (e: Exception) {
             Log.e("UpdateManager", "Failed to launch installer", e)
-            _errorMessage.value = "Failed to launch installer: ${e.localizedMessage}"
+            _errorMessage.value = "تعذر فتح مثبت الحزم: ${e.localizedMessage}"
+            Toast.makeText(context, "تعذر فتح مثبت الحزم: ${e.localizedMessage}", Toast.LENGTH_LONG).show()
         }
     }
 

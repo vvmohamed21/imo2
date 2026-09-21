@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>WatchRoom - تحميل أحدث إصدار</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700;800&display=swap" rel="stylesheet">
+  <style>
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+      font-family: 'Cairo', sans-serif;
+    }
+    body {
+      background: linear-gradient(135deg, #0A0D15 0%, #111726 100%);
+      color: #FFFFFF;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+      text-align: center;
+    }
+    .card {
+      background: rgba(22, 28, 44, 0.85);
+      border: 1px solid rgba(108, 92, 231, 0.3);
+      backdrop-filter: blur(12px);
+      border-radius: 28px;
+      padding: 40px 28px;
+      max-width: 440px;
+      width: 100%;
+      box-shadow: 0 20px 40px rgba(0, 0, 0, 0.5);
+    }
+    .logo {
+      width: 84px;
+      height: 84px;
+      background: linear-gradient(135deg, #6C5CE7 0%, #00E5FF 100%);
+      border-radius: 22px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      margin: 0 auto 20px;
+      font-size: 42px;
+      box-shadow: 0 10px 25px rgba(108, 92, 231, 0.4);
+    }
+    h1 {
+      font-size: 26px;
+      font-weight: 800;
+      margin-bottom: 8px;
+      background: linear-gradient(90deg, #FFFFFF, #B4B9D2);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+    .badge {
+      display: inline-block;
+      background: rgba(0, 230, 118, 0.15);
+      color: #00E676;
+      border: 1px solid rgba(0, 230, 118, 0.3);
+      padding: 4px 12px;
+      border-radius: 20px;
+      font-size: 13px;
+      font-weight: 700;
+      margin-bottom: 16px;
+    }
+    p {
+      font-size: 14px;
+      color: #9AA0B8;
+      line-height: 1.6;
+      margin-bottom: 28px;
+    }
+    .features {
+      text-align: right;
+      background: rgba(10, 13, 21, 0.6);
+      border-radius: 16px;
+      padding: 16px;
+      margin-bottom: 28px;
+      font-size: 13px;
+      color: #D1D5DB;
+    }
+    .features li {
+      list-style: none;
+      margin-bottom: 8px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .features li:last-child {
+      margin-bottom: 0;
+    }
+    .btn-download {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 10px;
+      background: linear-gradient(135deg, #6C5CE7 0%, #5844E3 100%);
+      color: #FFFFFF;
+      text-decoration: none;
+      font-size: 16px;
+      font-weight: 700;
+      padding: 16px 24px;
+      border-radius: 16px;
+      transition: all 0.2s ease;
+      box-shadow: 0 10px 20px rgba(108, 92, 231, 0.35);
+    }
+    .btn-download:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 14px 26px rgba(108, 92, 231, 0.5);
+    }
+    .btn-download:active {
+      transform: translateY(1px);
+    }
+    .info {
+      margin-top: 18px;
+      font-size: 11px;
+      color: #6C7293;
+    }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="logo">🎬</div>
+    <h1>WatchRoom</h1>
+    <div>
+      <span class="badge">أحدث إصدار مباشر (Latest Release)</span>
+    </div>
+    <p>تطبيق المشاهدة الجماعية المتزامنة للأفلام والمسلسلات مع الأصدقاء والصوت الجماعي في الوقت الفعلي.</p>
+
+    <div class="features">
+      <ul>
+        <li>✨ بث متزامن بدقة عالية للأفلام والمسلسلات</li>
+        <li>🌐 متصفح مدمج لايجي بست وكيو فيلم مع صائد الروابط الذكي</li>
+        <li>🛡️ حظر كامل للإعلانات والنوافذ المنبثقة</li>
+        <li>⚡ تحديث وتثبيت تلقائي من داخل التطبيق</li>
+      </ul>
+    </div>
+
+    <a href="/download" class="btn-download">
+      <span>⬇️</span>
+      <span>تحميل التطبيق الآن (APK)</span>
+    </a>
+
+    <div class="info">
+      يتم تنزيل أحدث نسخة مجمعة تلقائياً وبأعلى سرعة
+    </div>
+  </div>
+</body>
+</html>

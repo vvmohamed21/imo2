@@ -79,7 +79,9 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.zIndex
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
@@ -192,34 +194,24 @@ fun RoomScreen(
         ) {
             if (isHost) {
                 // HOST EXPERIENCE:
-                // Toggles between Browser (WebView) and ExoPlayer once media is sniffed
-                if (hostViewMode == "player" && !currentMedia?.mediaUrl.isNullOrBlank()) {
-                    PlayerPane(
-                        mediaUrl = currentMedia?.mediaUrl.orEmpty(),
-                        title = currentMedia?.title ?: "WatchRoom Stream",
-                        isHost = true,
-                        onUserControlAction = { action, timeSeconds ->
-                            socketManager.sendMediaControl(action, timeSeconds)
-                        },
-                        onSwitchToBrowser = {
-                            hostViewMode = "browser"
-                        },
-                        onToggleFullscreen = {
-                            isFullscreen = !isFullscreen
-                        },
-                        isFullscreen = isFullscreen,
-                        remoteControlCommand = latestRemoteControl
-                    )
-                } else {
-                    // Browser View
-                    Box(modifier = Modifier.fillMaxSize()) {
+                // BrowserPane stays alive in the background so navigating between browser and player
+                // never reloads or destroys the movie page or video element.
+                Box(modifier = Modifier.fillMaxSize()) {
+                    // Browser layer
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .alpha(if (hostViewMode == "browser" || currentMedia?.mediaUrl.isNullOrBlank()) 1f else 0f)
+                            .zIndex(if (hostViewMode == "browser" || currentMedia?.mediaUrl.isNullOrBlank()) 2f else 0f)
+                    ) {
                         BrowserPane(
-                            initialUrl = "https://archive.org/details/movies",
-                            onMediaCaptured = { streamUrl ->
+                            initialUrl = "https://www.egybest.co.in/",
+                            onMediaCaptured = { streamUrl, refererUrl ->
                                 socketManager.loadMedia(
                                     mediaUrl = streamUrl,
                                     timeSeconds = 0L,
-                                    title = "Sniffed Movie Stream"
+                                    title = "Sniffed Movie Stream",
+                                    referer = refererUrl
                                 )
                                 hostViewMode = "player"
                             }
@@ -249,13 +241,40 @@ fun RoomScreen(
                                     )
                                     Spacer(modifier = Modifier.width(4.dp))
                                     Text(
-                                        text = "Active Video",
+                                        text = "مشغل الفلم (Player)",
                                         fontSize = 11.sp,
                                         fontWeight = FontWeight.Bold,
                                         color = Color.White
                                     )
                                 }
                             }
+                        }
+                    }
+
+                    // Native Player layer
+                    if (hostViewMode == "player" && !currentMedia?.mediaUrl.isNullOrBlank()) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .zIndex(3f)
+                        ) {
+                            PlayerPane(
+                                mediaUrl = currentMedia?.mediaUrl.orEmpty(),
+                                referer = currentMedia?.referer.orEmpty(),
+                                title = currentMedia?.title ?: "WatchRoom Stream",
+                                isHost = true,
+                                onUserControlAction = { action, timeSeconds ->
+                                    socketManager.sendMediaControl(action, timeSeconds)
+                                },
+                                onSwitchToBrowser = {
+                                    hostViewMode = "browser"
+                                },
+                                onToggleFullscreen = {
+                                    isFullscreen = !isFullscreen
+                                },
+                                isFullscreen = isFullscreen,
+                                remoteControlCommand = latestRemoteControl
+                            )
                         }
                     }
                 }
@@ -267,6 +286,7 @@ fun RoomScreen(
                 } else {
                     PlayerPane(
                         mediaUrl = currentMedia?.mediaUrl.orEmpty(),
+                        referer = currentMedia?.referer.orEmpty(),
                         title = currentMedia?.title ?: "WatchRoom Stream",
                         isHost = false,
                         onUserControlAction = { action, timeSeconds ->

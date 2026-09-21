@@ -287,7 +287,7 @@ fun LobbyScreen(
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Text(
-                            text = "Downloading WatchRoom v${updateInfo?.versionName}...",
+                            text = "جاري تحميل التحديث ($downloadProgress%)...",
                             fontSize = 12.sp,
                             fontWeight = FontWeight.SemiBold,
                             color = Color.White
@@ -300,6 +300,7 @@ fun LobbyScreen(
                     }
                     Spacer(modifier = Modifier.height(8.dp))
                     LinearProgressIndicator(
+                        progress = { downloadProgress / 100f },
                         modifier = Modifier.fillMaxWidth().height(4.dp).clip(RoundedCornerShape(2.dp)),
                         color = Color(0xFF00E5FF),
                         trackColor = Color(0xFF26324A)
@@ -320,19 +321,67 @@ fun LobbyScreen(
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Text(
-                        text = "Update downloaded! Ready to install.",
-                        fontSize = 12.sp,
-                        color = Color(0xFF00E676),
-                        fontWeight = FontWeight.SemiBold
-                    )
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "تم تحميل التحديث بنجاح!",
+                            fontSize = 12.sp,
+                            color = Color(0xFF00E676),
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        Text(
+                            text = "اضغط على تثبيت للمتابعة",
+                            fontSize = 10.sp,
+                            color = Color.White.copy(alpha = 0.7f)
+                        )
+                    }
                     Button(
                         onClick = { updateManager?.installApk() },
                         colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF00E676)),
                         shape = RoundedCornerShape(10.dp),
                         modifier = Modifier.height(34.dp)
                     ) {
-                        Text("Install", color = Color.Black, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                        Text("تثبيت (Install)", color = Color.Black, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                    }
+                }
+            }
+        } else if (updateStatus == UpdateCheckStatus.ERROR && updateError != null) {
+            Card(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 24.dp, vertical = 8.dp),
+                shape = RoundedCornerShape(14.dp),
+                colors = CardDefaults.cardColors(containerColor = Color(0xFF2E1616)),
+                border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFFFF5252))
+            ) {
+                Row(
+                    modifier = Modifier.padding(12.dp).fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "تعذر إكمال التحديث",
+                            fontSize = 12.sp,
+                            color = Color(0xFFFF5252),
+                            fontWeight = FontWeight.Bold
+                        )
+                        Text(
+                            text = updateError ?: "",
+                            fontSize = 10.sp,
+                            color = Color.White.copy(alpha = 0.8f)
+                        )
+                    }
+                    Button(
+                        onClick = {
+                            updateInfo?.apkUrl?.let { url ->
+                                updateManager?.startDownload(url)
+                            }
+                        },
+                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFFF5252)),
+                        shape = RoundedCornerShape(10.dp),
+                        modifier = Modifier.height(32.dp)
+                    ) {
+                        Text("إعادة المحاولة", color = Color.White, fontSize = 10.sp)
                     }
                 }
             }

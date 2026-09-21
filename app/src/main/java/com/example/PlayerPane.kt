@@ -67,9 +67,11 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MimeTypes
+import android.webkit.CookieManager
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
+import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.hls.HlsMediaSource
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
@@ -81,6 +83,7 @@ import java.util.Locale
 @Composable
 fun PlayerPane(
     mediaUrl: String,
+    referer: String = "",
     title: String = "WatchRoom Stream",
     isHost: Boolean = false,
     onUserControlAction: (action: String, timeSeconds: Long) -> Unit,
@@ -103,22 +106,62 @@ fun PlayerPane(
     // Anti-echo suppression timestamp: local actions are ignored from re-triggering network events
     var suppressUntilMs by remember { mutableLongStateOf(0L) }
 
-    // ExoPlayer creation
-    val exoPlayer = remember {
-        ExoPlayer.Builder(context).build().apply {
-            playWhenReady = true
-            repeatMode = Player.REPEAT_MODE_OFF
+    // ExoPlayer creation with specialized Referer, User-Agent, and Cookies for streaming sites
+    val exoPlayer = remember(context) {
+        val uri = try { Uri.parse(mediaUrl) } catch (e: Exception) { Uri.EMPTY }
+        val host = uri.host ?: ""
+        val resolvedReferer = when {
+            referer.isNotBlank() -> referer
+            host.contains("qfilm") -> "https://a.qfilm.tv/"
+            host.contains("egybest") -> "https://www.egybest.co.in/"
+            host.isNotBlank() -> "${uri.scheme ?: "https"}://$host/"
+            else -> "https://www.egybest.co.in/"
         }
+        val origin = if (host.isNotBlank()) "${uri.scheme ?: "https"}://$host" else "https://www.egybest.co.in"
+        val cookieHeader = try {
+            CookieManager.getInstance().getCookie(resolvedReferer)
+                ?: CookieManager.getInstance().getCookie(mediaUrl)
+                ?: ""
+        } catch (e: Exception) { "" }
+
+        val headers = mutableMapOf(
+            "User-Agent" to "Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36",
+            "Referer" to resolvedReferer,
+            "Origin" to origin,
+            "Accept" to "*/*",
+            "Accept-Language" to "ar,en-US,en;q=0.9"
+        )
+        if (cookieHeader.isNotBlank()) {
+            headers["Cookie"] = cookieHeader
+        }
+
+        val httpDataSourceFactory = DefaultHttpDataSource.Factory()
+            .setUserAgent("Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36")
+            .setAllowCrossProtocolRedirects(true)
+            .setKeepPostFor302Redirects(true)
+            .setConnectTimeoutMs(25000)
+            .setReadTimeoutMs(30000)
+            .setDefaultRequestProperties(headers)
+
+        val mediaSourceFactory = DefaultMediaSourceFactory(context)
+            .setDataSourceFactory(httpDataSourceFactory)
+
+        ExoPlayer.Builder(context)
+            .setMediaSourceFactory(mediaSourceFactory)
+            .build().apply {
+                playWhenReady = true
+                repeatMode = Player.REPEAT_MODE_OFF
+            }
     }
 
     // Prepare media when URL changes
-    LaunchedEffect(mediaUrl) {
+    LaunchedEffect(mediaUrl, referer) {
         if (mediaUrl.isNotBlank()) {
             playbackError = null
             isBuffering = true
             try {
                 val uri = Uri.parse(mediaUrl)
-                val mediaItem = if (mediaUrl.contains(".m3u8") || mediaUrl.contains("/hls/")) {
+                val mediaItem = if (mediaUrl.contains(".m3u8") || mediaUrl.contains("/hls/") || mediaUrl.contains("m3u8")) {
                     MediaItem.Builder()
                         .setUri(uri)
                         .setMimeType(MimeTypes.APPLICATION_M3U8)
@@ -291,20 +334,44 @@ fun PlayerPane(
                         fontSize = 13.sp,
                         fontWeight = FontWeight.Medium
                     )
-                    if (isHost) {
-                        Spacer(modifier = Modifier.height(12.dp))
+                    Spacer(modifier = Modifier.height(14.dp))
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
                         Surface(
-                            onClick = onSwitchToBrowser,
+                            onClick = {
+                                playbackError = null
+                                isBuffering = true
+                                exoPlayer.prepare()
+                                exoPlayer.play()
+                            },
                             shape = RoundedCornerShape(16.dp),
-                            color = Color(0xFF6C5CE7)
+                            color = Color(0xFF00E676)
                         ) {
                             Text(
-                                text = "Return to Browser",
-                                color = Color.White,
+                                text = "إعادة المحاولة (Retry)",
+                                color = Color.Black,
                                 fontSize = 12.sp,
-                                fontWeight = FontWeight.SemiBold,
-                                modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
+                                fontWeight = FontWeight.Bold,
+                                modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp)
                             )
+                        }
+
+                        if (isHost) {
+                            Surface(
+                                onClick = onSwitchToBrowser,
+                                shape = RoundedCornerShape(16.dp),
+                                color = Color(0xFF6C5CE7)
+                            ) {
+                                Text(
+                                    text = "العودة للمتصفح (Browser)",
+                                    color = Color.White,
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp)
+                                )
+                            }
                         }
                     }
                 }

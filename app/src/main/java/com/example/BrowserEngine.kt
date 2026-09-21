@@ -8,6 +8,7 @@ import android.os.Handler
 import android.os.Looper
 import android.util.Log
 import android.webkit.ConsoleMessage
+import android.webkit.CookieManager
 import android.webkit.JavascriptInterface
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
@@ -15,12 +16,19 @@ import android.webkit.WebResourceResponse
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import android.widget.Toast
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -38,9 +46,13 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.ArrowForward
 import androidx.compose.material.icons.filled.Clear
+import androidx.compose.material.icons.filled.Movie
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Public
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
@@ -76,17 +88,29 @@ import androidx.compose.ui.viewinterop.AndroidView
 
 private const val TAG = "BrowserEngine"
 
-// Ad & tracker blacklist keywords
+// Standard Mobile Chrome User-Agent for modern video streaming sites
+private const val CHROME_USER_AGENT =
+    "Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36"
+
+// Comprehensive ad & popup blacklist keywords
 private val AD_BLOCK_KEYWORDS = listOf(
-    "doubleclick.net", "googlesyndication.com", "google-analytics.com",
-    "adnxs.com", "popads.net", "popcash.net", "adsterra.com", "propellerads.com",
-    "adtrue.com", "yllix.com", "exoclick.com", "trafficjunky.com",
-    "/ads/", "/banner/", "/popups/", "adclick", "adservice"
+    "doubleclick", "googlesyndication", "googleads", "pagead", "gampad", "adnxs",
+    "popads", "popcash", "adsterra", "propellerads", "adtrue", "yllix", "exoclick",
+    "trafficjunky", "trafficstars", "monetag", "hilltopads", "adcash", "clickadu",
+    "richaudience", "vidoomy", "aniview", "brid.tv", "connatix", "springserve",
+    "spotx", "pubmatic", "openx", "teads", "outbrain", "taboola", "criteo",
+    "smartadserver", "rubiconproject", "casalemedia", "adkeeper", "adskeeper",
+    "adkernel", "mgid", "medianet", "adsupply", "admaven", "juicyads",
+    "ero-advertising", "adform", "bidswitch", "imasdk", "adcolony", "applovin",
+    "unityads", "vungle", "in-page-push", "/ads/", "/ad/", "/advert", "/banner/",
+    "/popups/", "adclick", "adservice", "adserver", "preroll", "midroll", "postroll",
+    "vast.xml", "vpaid", "ad_type", "ad_slot", "ad_unit", "video-ad", "advideo",
+    "ad.mp4", "promo.mp4"
 )
 
-// Direct streaming indicators
+// Direct streaming indicators (only real video streams, NOT 2-second individual .ts segments)
 private val MEDIA_EXTENSIONS = listOf(
-    ".m3u8", ".mp4", "/hls/", "/video/", ".mpd", ".ts", "/playlist.m3u8"
+    ".m3u8", ".mp4", ".mpd", ".webm", ".mkv", "/hls/", "playlist.m3u8", "master.m3u8", "index.m3u8"
 )
 
 data class QuickBookmark(
@@ -96,6 +120,21 @@ data class QuickBookmark(
 )
 
 val DEFAULT_BOOKMARKS = listOf(
+    QuickBookmark(
+        title = "ايجي بست (EgyBest)",
+        url = "https://www.egybest.co.in/",
+        isDirectMedia = false
+    ),
+    QuickBookmark(
+        title = "كيو فيلم (QFilm)",
+        url = "https://a.qfilm.tv/",
+        isDirectMedia = false
+    ),
+    QuickBookmark(
+        title = "بحث أفلام (Google)",
+        url = "https://www.google.com/search?q=%D8%A7%D9%81%D9%84%D8%A7%D9%85+%D8%A7%D9%88%D9%86%D9%84%D8%A7%D9%8A%D9%86+%D9%85%D8%AA%D8%B1%D8%AC%D9%85%D8%A9",
+        isDirectMedia = false
+    ),
     QuickBookmark(
         title = "Big Buck Bunny (HLS)",
         url = "https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8",
@@ -110,38 +149,34 @@ val DEFAULT_BOOKMARKS = listOf(
         title = "Sintel (HLS)",
         url = "https://bitdash-a.akamaihd.net/content/sintel/hls/playlist.m3u8",
         isDirectMedia = true
-    ),
-    QuickBookmark(
-        title = "Archive Movies",
-        url = "https://archive.org/details/movies",
-        isDirectMedia = false
-    ),
-    QuickBookmark(
-        title = "EgyBest Search",
-        url = "https://www.google.com/search?q=egybest+watch+online",
-        isDirectMedia = false
     )
 )
 
 /**
- * Android Video Sniffer and Popup/Ad-protected Browser
+ * Android Video Sniffer and Popup/Ad-protected Browser Client
  */
 class VideoSnifferClient(
-    private val onMediaCaptured: (url: String) -> Unit,
+    private val onMediaDetected: (streamUrl: String, refererUrl: String) -> Unit,
     private val onPageLoading: (isLoading: Boolean, progress: Float) -> Unit,
     private val onUrlChanged: (url: String) -> Unit
 ) : WebViewClient() {
 
     private val mainHandler = Handler(Looper.getMainLooper())
     private var lastCapturedUrl: String? = null
+    var currentPageUrl: String = ""
+        private set
 
     private fun isMediaUrl(url: String): Boolean {
         val lower = url.lowercase()
-        // Must match media signatures
-        val hasMediaPattern = MEDIA_EXTENSIONS.any { lower.contains(it) }
+        // Ignore single .ts segments (which are only 2s fragments, not full streams)
+        if (lower.endsWith(".ts") && !lower.contains(".m3u8")) return false
+        if (lower.startsWith("blob:") || lower.startsWith("data:")) return false
+
         // Must NOT be an ad or tracker
         val isAd = AD_BLOCK_KEYWORDS.any { lower.contains(it) }
-        return hasMediaPattern && !isAd
+        if (isAd) return false
+
+        return MEDIA_EXTENSIONS.any { lower.contains(it) }
     }
 
     private fun isAdUrl(url: String): Boolean {
@@ -160,17 +195,10 @@ class VideoSnifferClient(
             return true
         }
 
-        // Block external ad redirects
+        // Block ad popups
         if (isAdUrl(url)) {
-            Log.d(TAG, "Blocked ad redirect: $url")
+            Log.d(TAG, "Blocked ad popup navigation: $url")
             return true
-        }
-
-        // Check if navigation itself is a direct media stream
-        if (isMediaUrl(url)) {
-            Log.i(TAG, "Navigating to direct media: $url")
-            notifyMediaCaptured(url)
-            return true // handled by native player
         }
 
         return false
@@ -189,7 +217,7 @@ class VideoSnifferClient(
 
         // Sniff media stream
         if (isMediaUrl(url)) {
-            Log.i(TAG, "Sniffed direct stream from network request: $url")
+            Log.i(TAG, "Sniffed stream from network request: $url")
             notifyMediaCaptured(url)
         }
 
@@ -198,12 +226,14 @@ class VideoSnifferClient(
 
     override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
         super.onPageStarted(view, url, favicon)
+        currentPageUrl = url ?: ""
         onPageLoading(true, 0.1f)
         url?.let { onUrlChanged(it) }
     }
 
     override fun onPageFinished(view: WebView?, url: String?) {
         super.onPageFinished(view, url)
+        currentPageUrl = url ?: ""
         onPageLoading(false, 1.0f)
         url?.let { onUrlChanged(it) }
 
@@ -213,17 +243,33 @@ class VideoSnifferClient(
                 if (window.__watchroom_injected) return;
                 window.__watchroom_injected = true;
 
+                var adKeywords = [
+                    'ad', 'ads', 'doubleclick', 'googleads', 'preroll', 'vast', 
+                    'popads', 'adsterra', 'propeller', 'monetag', 'ima3', 'banner', 'midroll'
+                ];
+
+                function isAd(u) {
+                    if (!u) return true;
+                    var l = u.toLowerCase();
+                    for (var i = 0; i < adKeywords.length; i++) {
+                        if (l.indexOf(adKeywords[i]) !== -1) return true;
+                    }
+                    return false;
+                }
+
                 function sniffVideo(v) {
                     if (!v) return;
                     var src = v.currentSrc || v.src;
-                    if (src && src.length > 5 && !src.startsWith('blob:')) {
-                        WatchRoomBridge.onMediaFound(src);
+                    if (src && src.length > 5 && !src.startsWith('blob:') && !isAd(src)) {
+                        WatchRoomBridge.onMediaFound(src, window.location.href);
+                        return;
                     }
                     var sources = v.getElementsByTagName('source');
                     for (var i = 0; i < sources.length; i++) {
                         var s = sources[i].src;
-                        if (s && s.length > 5) {
-                            WatchRoomBridge.onMediaFound(s);
+                        if (s && s.length > 5 && !s.startsWith('blob:') && !isAd(s)) {
+                            WatchRoomBridge.onMediaFound(s, window.location.href);
+                            return;
                         }
                     }
                 }
@@ -254,7 +300,7 @@ class VideoSnifferClient(
         if (lastCapturedUrl == url) return
         lastCapturedUrl = url
         mainHandler.post {
-            onMediaCaptured(url)
+            onMediaDetected(url, currentPageUrl)
         }
     }
 }
@@ -263,16 +309,16 @@ class VideoSnifferClient(
  * JavaScript interface bridge for DOM-level media capture
  */
 class VideoSnifferBridge(
-    private val onMediaCaptured: (url: String) -> Unit
+    private val onMediaCaptured: (url: String, referer: String) -> Unit
 ) {
     private val mainHandler = Handler(Looper.getMainLooper())
 
     @JavascriptInterface
-    fun onMediaFound(url: String?) {
+    fun onMediaFound(url: String?, referer: String?) {
         if (!url.isNullOrBlank()) {
             Log.i(TAG, "Bridge captured video DOM src: $url")
             mainHandler.post {
-                onMediaCaptured(url)
+                onMediaCaptured(url, referer.orEmpty())
             }
         }
     }
@@ -281,260 +327,401 @@ class VideoSnifferBridge(
 @SuppressLint("SetJavaScriptEnabled")
 @Composable
 fun BrowserPane(
-    initialUrl: String = "https://archive.org/details/movies",
-    onMediaCaptured: (streamUrl: String) -> Unit,
+    initialUrl: String = "https://www.egybest.co.in/",
+    onMediaCaptured: (streamUrl: String, refererUrl: String) -> Unit,
     modifier: Modifier = Modifier
 ) {
+    val context = LocalContext.current
     var webViewInstance by remember { mutableStateOf<WebView?>(null) }
     var currentUrlText by remember { mutableStateOf(initialUrl) }
     var isLoading by remember { mutableStateOf(false) }
     var loadingProgress by remember { mutableFloatStateOf(0f) }
     val focusManager = LocalFocusManager.current
 
-    Column(
+    // Detected video stream ready for user confirmation
+    var detectedStreamUrl by remember { mutableStateOf<String?>(null) }
+    var detectedRefererUrl by remember { mutableStateOf<String?>(null) }
+
+    Box(
         modifier = modifier
             .fillMaxSize()
             .background(Color(0xFF0D111A))
     ) {
-        // Browser URL and Navigation Bar
-        Surface(
-            color = Color(0xFF131826),
-            tonalElevation = 2.dp,
-            modifier = Modifier.fillMaxWidth()
-        ) {
-            Column(modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp)) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    IconButton(
-                        onClick = {
-                            if (webViewInstance?.canGoBack() == true) {
-                                webViewInstance?.goBack()
-                            }
-                        },
-                        modifier = Modifier.size(36.dp).testTag("browser_back_button")
+        Column(modifier = Modifier.fillMaxSize()) {
+            // Browser URL and Navigation Bar
+            Surface(
+                color = Color(0xFF131826),
+                tonalElevation = 2.dp,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Icon(
-                            imageVector = Icons.AutoMirrored.Filled.ArrowBack,
-                            contentDescription = "Back",
-                            tint = Color.White.copy(alpha = 0.85f),
-                            modifier = Modifier.size(18.dp)
-                        )
-                    }
-
-                    IconButton(
-                        onClick = {
-                            if (webViewInstance?.canGoForward() == true) {
-                                webViewInstance?.goForward()
-                            }
-                        },
-                        modifier = Modifier.size(36.dp).testTag("browser_forward_button")
-                    ) {
-                        Icon(
-                            imageVector = Icons.AutoMirrored.Filled.ArrowForward,
-                            contentDescription = "Forward",
-                            tint = Color.White.copy(alpha = 0.85f),
-                            modifier = Modifier.size(18.dp)
-                        )
-                    }
-
-                    IconButton(
-                        onClick = { webViewInstance?.reload() },
-                        modifier = Modifier.size(36.dp).testTag("browser_reload_button")
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Refresh,
-                            contentDescription = "Reload",
-                            tint = Color.White.copy(alpha = 0.85f),
-                            modifier = Modifier.size(18.dp)
-                        )
-                    }
-
-                    Spacer(modifier = Modifier.width(4.dp))
-
-                    // Address Bar
-                    OutlinedTextField(
-                        value = currentUrlText,
-                        onValueChange = { currentUrlText = it },
-                        modifier = Modifier
-                            .weight(1f)
-                            .height(48.dp)
-                            .testTag("browser_url_input"),
-                        singleLine = true,
-                        placeholder = {
-                            Text(
-                                "Enter movie URL or search",
-                                fontSize = 12.sp,
-                                color = Color.White.copy(alpha = 0.4f)
-                            )
-                        },
-                        textStyle = MaterialTheme.typography.bodyMedium.copy(
-                            fontSize = 12.sp,
-                            color = Color.White
-                        ),
-                        colors = OutlinedTextFieldDefaults.colors(
-                            focusedBorderColor = Color(0xFF6C5CE7),
-                            unfocusedBorderColor = Color(0xFF2A344A),
-                            focusedContainerColor = Color(0xFF0A0D15),
-                            unfocusedContainerColor = Color(0xFF0A0D15),
-                            cursorColor = Color(0xFF6C5CE7)
-                        ),
-                        shape = RoundedCornerShape(20.dp),
-                        trailingIcon = {
-                            if (currentUrlText.isNotBlank()) {
-                                IconButton(
-                                    onClick = { currentUrlText = "" },
-                                    modifier = Modifier.size(24.dp)
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Default.Clear,
-                                        contentDescription = "Clear text",
-                                        tint = Color.White.copy(alpha = 0.6f),
-                                        modifier = Modifier.size(14.dp)
-                                    )
-                                }
-                            }
-                        },
-                        keyboardOptions = KeyboardOptions(
-                            keyboardType = KeyboardType.Uri,
-                            imeAction = ImeAction.Go
-                        ),
-                        keyboardActions = KeyboardActions(
-                            onGo = {
-                                focusManager.clearFocus()
-                                val target = currentUrlText.trim()
-                                val finalUrl = when {
-                                    target.startsWith("http://") || target.startsWith("https://") -> target
-                                    target.contains(".") && !target.contains(" ") -> "https://$target"
-                                    else -> "https://www.google.com/search?q=" + Uri.encode(target)
-                                }
-                                currentUrlText = finalUrl
-                                webViewInstance?.loadUrl(finalUrl)
-                            }
-                        )
-                    )
-                }
-
-                // Quick Bookmarks row
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .horizontalScroll(rememberScrollState())
-                        .padding(top = 4.dp),
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
-                ) {
-                    DEFAULT_BOOKMARKS.forEach { bm ->
-                        FilterChip(
-                            selected = false,
+                        IconButton(
                             onClick = {
-                                focusManager.clearFocus()
-                                if (bm.isDirectMedia) {
-                                    // Direct media link test
-                                    onMediaCaptured(bm.url)
-                                } else {
-                                    currentUrlText = bm.url
-                                    webViewInstance?.loadUrl(bm.url)
+                                if (webViewInstance?.canGoBack() == true) {
+                                    webViewInstance?.goBack()
                                 }
                             },
-                            label = {
+                            modifier = Modifier.size(36.dp).testTag("browser_back_button")
+                        ) {
+                            Icon(
+                                imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                                contentDescription = "Back",
+                                tint = Color.White.copy(alpha = 0.85f),
+                                modifier = Modifier.size(18.dp)
+                            )
+                        }
+
+                        IconButton(
+                            onClick = {
+                                if (webViewInstance?.canGoForward() == true) {
+                                    webViewInstance?.goForward()
+                                }
+                            },
+                            modifier = Modifier.size(36.dp).testTag("browser_forward_button")
+                        ) {
+                            Icon(
+                                imageVector = Icons.AutoMirrored.Filled.ArrowForward,
+                                contentDescription = "Forward",
+                                tint = Color.White.copy(alpha = 0.85f),
+                                modifier = Modifier.size(18.dp)
+                            )
+                        }
+
+                        IconButton(
+                            onClick = { webViewInstance?.reload() },
+                            modifier = Modifier.size(36.dp).testTag("browser_reload_button")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Refresh,
+                                contentDescription = "Reload",
+                                tint = Color.White.copy(alpha = 0.85f),
+                                modifier = Modifier.size(18.dp)
+                            )
+                        }
+
+                        Spacer(modifier = Modifier.width(4.dp))
+
+                        // Address Bar
+                        OutlinedTextField(
+                            value = currentUrlText,
+                            onValueChange = { currentUrlText = it },
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(48.dp)
+                                .testTag("browser_url_input"),
+                            singleLine = true,
+                            placeholder = {
                                 Text(
-                                    text = bm.title,
-                                    fontSize = 11.sp,
-                                    fontWeight = FontWeight.Medium
+                                    "ابحث عن فلم أو أدخل الرابط",
+                                    fontSize = 12.sp,
+                                    color = Color.White.copy(alpha = 0.4f)
                                 )
                             },
-                            colors = FilterChipDefaults.filterChipColors(
-                                containerColor = if (bm.isDirectMedia) Color(0xFF1F2847) else Color(0xFF1A1F2C),
-                                labelColor = if (bm.isDirectMedia) Color(0xFF64B5F6) else Color.White.copy(alpha = 0.85f)
+                            textStyle = MaterialTheme.typography.bodyMedium.copy(
+                                fontSize = 12.sp,
+                                color = Color.White
                             ),
-                            border = FilterChipDefaults.filterChipBorder(
-                                enabled = true,
+                            colors = OutlinedTextFieldDefaults.colors(
+                                focusedBorderColor = Color(0xFF6C5CE7),
+                                unfocusedBorderColor = Color(0xFF2A344A),
+                                focusedContainerColor = Color(0xFF0A0D15),
+                                unfocusedContainerColor = Color(0xFF0A0D15),
+                                cursorColor = Color(0xFF6C5CE7)
+                            ),
+                            shape = RoundedCornerShape(20.dp),
+                            trailingIcon = {
+                                if (currentUrlText.isNotBlank()) {
+                                    IconButton(
+                                        onClick = { currentUrlText = "" },
+                                        modifier = Modifier.size(24.dp)
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.Clear,
+                                            contentDescription = "Clear text",
+                                            tint = Color.White.copy(alpha = 0.6f),
+                                            modifier = Modifier.size(14.dp)
+                                        )
+                                    }
+                                }
+                            },
+                            keyboardOptions = KeyboardOptions(
+                                keyboardType = KeyboardType.Uri,
+                                imeAction = ImeAction.Go
+                            ),
+                            keyboardActions = KeyboardActions(
+                                onGo = {
+                                    focusManager.clearFocus()
+                                    val target = currentUrlText.trim()
+                                    val finalUrl = when {
+                                        target.startsWith("http://") || target.startsWith("https://") -> target
+                                        target.contains(".") && !target.contains(" ") -> "https://$target"
+                                        else -> "https://www.google.com/search?q=" + Uri.encode(target)
+                                    }
+                                    currentUrlText = finalUrl
+                                    webViewInstance?.loadUrl(finalUrl)
+                                }
+                            )
+                        )
+
+                        Spacer(modifier = Modifier.width(4.dp))
+
+                        // Manual Video Sniffer Trigger button
+                        IconButton(
+                            onClick = {
+                                focusManager.clearFocus()
+                                val jsQuery = """
+                                    (function() {
+                                        var v = document.querySelector('video');
+                                        if (v) {
+                                            var src = v.currentSrc || v.src;
+                                            if (!src || src.startsWith('blob:')) {
+                                                var sources = v.querySelectorAll('source');
+                                                for (var i = 0; i < sources.length; i++) {
+                                                    if (sources[i].src && !sources[i].src.startsWith('blob:')) {
+                                                        src = sources[i].src;
+                                                        break;
+                                                    }
+                                                }
+                                            }
+                                            if (src && src.length > 5 && !src.startsWith('blob:')) {
+                                                WatchRoomBridge.onMediaFound(src, window.location.href);
+                                                return src;
+                                            }
+                                        }
+                                        return '';
+                                    })()
+                                """.trimIndent()
+
+                                webViewInstance?.evaluateJavascript(jsQuery) { result ->
+                                    val clean = result?.replace("\"", "") ?: ""
+                                    if (clean.isNotBlank() && clean != "null") {
+                                        Toast.makeText(context, "🎬 تم التقاط الفيديو!", Toast.LENGTH_SHORT).show()
+                                    } else {
+                                        Toast.makeText(context, "يرجى الضغط على زر تشغيل الفلم في الموقع أولاً", Toast.LENGTH_LONG).show()
+                                    }
+                                }
+                            },
+                            modifier = Modifier
+                                .size(36.dp)
+                                .clip(CircleShape)
+                                .background(Color(0xFF6C5CE7).copy(alpha = 0.2f))
+                                .testTag("sniff_video_button")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Movie,
+                                contentDescription = "Sniff Video",
+                                tint = Color(0xFF6C5CE7),
+                                modifier = Modifier.size(20.dp)
+                            )
+                        }
+                    }
+
+                    // Quick Bookmarks row
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState())
+                            .padding(top = 4.dp),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        DEFAULT_BOOKMARKS.forEach { bm ->
+                            FilterChip(
                                 selected = false,
-                                borderColor = if (bm.isDirectMedia) Color(0xFF3F51B5) else Color(0xFF2C344A)
-                            ),
-                            shape = RoundedCornerShape(12.dp),
-                            modifier = Modifier.height(28.dp)
+                                onClick = {
+                                    focusManager.clearFocus()
+                                    if (bm.isDirectMedia) {
+                                        onMediaCaptured(bm.url, bm.url)
+                                    } else {
+                                        currentUrlText = bm.url
+                                        webViewInstance?.loadUrl(bm.url)
+                                    }
+                                },
+                                label = {
+                                    Text(
+                                        text = bm.title,
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.Medium
+                                    )
+                                },
+                                colors = FilterChipDefaults.filterChipColors(
+                                    containerColor = if (bm.isDirectMedia) Color(0xFF1F2847) else Color(0xFF1A1F2C),
+                                    labelColor = if (bm.isDirectMedia) Color(0xFF64B5F6) else Color.White.copy(alpha = 0.85f)
+                                ),
+                                border = FilterChipDefaults.filterChipBorder(
+                                    enabled = true,
+                                    selected = false,
+                                    borderColor = if (bm.isDirectMedia) Color(0xFF3F51B5) else Color(0xFF2C344A)
+                                ),
+                                shape = RoundedCornerShape(12.dp),
+                                modifier = Modifier.height(28.dp)
+                            )
+                        }
+                    }
+                }
+            }
+
+            // Web Loading Progress
+            if (isLoading) {
+                LinearProgressIndicator(
+                    progress = { loadingProgress },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(2.dp),
+                    color = Color(0xFF6C5CE7),
+                    trackColor = Color(0xFF131826),
+                )
+            }
+
+            // Native WebView
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .weight(1f)
+            ) {
+                AndroidView(
+                    modifier = Modifier.fillMaxSize().testTag("host_browser_webview"),
+                    factory = { ctx ->
+                        WebView(ctx).apply {
+                            webViewInstance = this
+
+                            // Enable modern Cookies
+                            CookieManager.getInstance().setAcceptCookie(true)
+                            CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
+
+                            // Configure Responsive & Ad/Popup-Blocking WebViewSettings
+                            settings.apply {
+                                javaScriptEnabled = true
+                                domStorageEnabled = true
+                                mediaPlaybackRequiresUserGesture = false
+                                setSupportMultipleWindows(false)
+                                javaScriptCanOpenWindowsAutomatically = false
+                                loadsImagesAutomatically = true
+                                mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
+                                userAgentString = CHROME_USER_AGENT
+                                databaseEnabled = true
+                                useWideViewPort = true
+                                loadWithOverviewMode = true
+                                displayZoomControls = false
+                                builtInZoomControls = true
+                                allowFileAccess = false
+                                allowContentAccess = false
+                            }
+
+                            // Add Javascript Interface for HTML5 video sniffing
+                            addJavascriptInterface(
+                                VideoSnifferBridge { capturedUrl, referer ->
+                                    detectedStreamUrl = capturedUrl
+                                    detectedRefererUrl = referer.ifBlank { url ?: "" }
+                                },
+                                "WatchRoomBridge"
+                            )
+
+                            webChromeClient = object : WebChromeClient() {
+                                override fun onProgressChanged(view: WebView?, newProgress: Int) {
+                                    loadingProgress = newProgress / 100f
+                                    isLoading = newProgress < 100
+                                }
+
+                                override fun onConsoleMessage(consoleMessage: ConsoleMessage?): Boolean {
+                                    return true
+                                }
+                            }
+
+                            webViewClient = VideoSnifferClient(
+                                onMediaDetected = { streamUrl, referer ->
+                                    detectedStreamUrl = streamUrl
+                                    detectedRefererUrl = referer
+                                },
+                                onPageLoading = { loading, prog ->
+                                    isLoading = loading
+                                    loadingProgress = prog
+                                },
+                                onUrlChanged = { newUrl ->
+                                    currentUrlText = newUrl
+                                }
+                            )
+
+                            loadUrl(initialUrl)
+                        }
+                    },
+                    update = { webView ->
+                        webViewInstance = webView
+                    }
+                )
+            }
+        }
+
+        // Floating Action Banner when Video Stream is Detected
+        AnimatedVisibility(
+            visible = detectedStreamUrl != null,
+            enter = fadeIn() + slideInVertically(initialOffsetY = { it }),
+            exit = fadeOut() + slideOutVertically(targetOffsetY = { it }),
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .padding(12.dp)
+        ) {
+            Surface(
+                color = Color(0xFF1B2234),
+                shape = RoundedCornerShape(16.dp),
+                shadowElevation = 8.dp,
+                border = BorderStroke(1.dp, Color(0xFF6C5CE7))
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.PlayArrow,
+                        contentDescription = "Movie Detected",
+                        tint = Color(0xFF00E676),
+                        modifier = Modifier.size(24.dp)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "🎬 تم التقاط رابط الفلم بنجاح!",
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = Color.White
+                        )
+                        Text(
+                            text = "اضغط لتشغيله متزامناً مع الجميع في الغرفة",
+                            fontSize = 10.sp,
+                            color = Color.White.copy(alpha = 0.7f)
+                        )
+                    }
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Button(
+                        onClick = {
+                            detectedStreamUrl?.let { url ->
+                                onMediaCaptured(url, detectedRefererUrl.orEmpty())
+                            }
+                            detectedStreamUrl = null
+                        },
+                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF6C5CE7)),
+                        shape = RoundedCornerShape(12.dp),
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
+                    ) {
+                        Text("تشغيل في الغرفة", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                    }
+                    Spacer(modifier = Modifier.width(4.dp))
+                    IconButton(
+                        onClick = { detectedStreamUrl = null },
+                        modifier = Modifier.size(24.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Clear,
+                            contentDescription = "Dismiss",
+                            tint = Color.White.copy(alpha = 0.5f),
+                            modifier = Modifier.size(16.dp)
                         )
                     }
                 }
             }
-        }
-
-        // Web Loading Progress
-        if (isLoading) {
-            LinearProgressIndicator(
-                progress = { loadingProgress },
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(2.dp),
-                color = Color(0xFF6C5CE7),
-                trackColor = Color(0xFF131826),
-            )
-        }
-
-        // Native WebView
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .weight(1f)
-        ) {
-            AndroidView(
-                modifier = Modifier.fillMaxSize().testTag("host_browser_webview"),
-                factory = { context ->
-                    WebView(context).apply {
-                        webViewInstance = this
-
-                        // Configure Ad/Popup-Blocking WebViewSettings
-                        settings.apply {
-                            javaScriptEnabled = true
-                            domStorageEnabled = true
-                            mediaPlaybackRequiresUserGesture = false
-                            setSupportMultipleWindows(false) // Blocks popup popunders
-                            javaScriptCanOpenWindowsAutomatically = false
-                            loadsImagesAutomatically = true
-                            mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
-                            userAgentString = settings.userAgentString + " WatchRoomBrowser/1.0"
-                            databaseEnabled = true
-                        }
-
-                        // Add Javascript Interface for HTML5 video sniffing
-                        addJavascriptInterface(
-                            VideoSnifferBridge { capturedUrl ->
-                                onMediaCaptured(capturedUrl)
-                            },
-                            "WatchRoomBridge"
-                        )
-
-                        webChromeClient = object : WebChromeClient() {
-                            override fun onProgressChanged(view: WebView?, newProgress: Int) {
-                                loadingProgress = newProgress / 100f
-                                isLoading = newProgress < 100
-                            }
-
-                            override fun onConsoleMessage(consoleMessage: ConsoleMessage?): Boolean {
-                                return true
-                            }
-                        }
-
-                        webViewClient = VideoSnifferClient(
-                            onMediaCaptured = onMediaCaptured,
-                            onPageLoading = { loading, prog ->
-                                isLoading = loading
-                                loadingProgress = prog
-                            },
-                            onUrlChanged = { newUrl ->
-                                currentUrlText = newUrl
-                            }
-                        )
-
-                        loadUrl(initialUrl)
-                    }
-                },
-                update = { webView ->
-                    webViewInstance = webView
-                }
-            )
         }
     }
 

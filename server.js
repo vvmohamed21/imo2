@@ -77,21 +77,55 @@ app.get('/health', (req, res) => {
   res.json({ status: 'ok', uptime: process.uptime() });
 });
 
-// Direct APK Download Endpoint
+const fs = require('fs');
+
+// Helper to find newest APK available across build outputs or public directory
+function getLatestApkPath() {
+  const possiblePaths = [
+    path.join(__dirname, 'app', 'build', 'outputs', 'apk', 'debug', 'app-debug.apk'),
+    path.join(__dirname, '.build-outputs', 'app-debug.apk'),
+    path.join(__dirname, 'public', 'watchroom.apk')
+  ];
+
+  let latestFile = null;
+  let latestMtime = 0;
+
+  for (const p of possiblePaths) {
+    if (fs.existsSync(p)) {
+      const stats = fs.statSync(p);
+      if (stats.size > 1000000 && stats.mtimeMs > latestMtime) {
+        latestMtime = stats.mtimeMs;
+        latestFile = p;
+      }
+    }
+  }
+
+  return latestFile || path.join(__dirname, 'public', 'watchroom.apk');
+}
+
+// Direct APK Download Endpoint (Always serves the freshest, latest build)
 app.get('/download', (req, res) => {
-  const apkPath = path.join(__dirname, 'public', 'watchroom.apk');
-  res.download(apkPath, 'watchroom.apk');
+  const apkPath = getLatestApkPath();
+  if (fs.existsSync(apkPath)) {
+    res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
+    res.download(apkPath, 'watchroom.apk');
+  } else {
+    res.status(404).send('APK file not found');
+  }
 });
 
 // In-App Self Update Endpoint
 app.get('/api/version', (req, res) => {
   const host = req.get('host');
   const protocol = req.protocol === 'https' || req.get('x-forwarded-proto') === 'https' ? 'https' : 'http';
+  res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
   res.json({
     versionCode: 2,
     versionName: "1.0.1",
     apkUrl: `${protocol}://${host}/download`,
-    changelog: "Added full cloud server support, Render hosting config, and in-app self updater.",
+    changelog: "أحدث إصدار: دعم السيرفر السحابي، إزالة archive.org، متصفح ايجي بست وكيو فيلم، وإصلاح التثبيت التلقائي.",
     forceUpdate: false
   });
 });

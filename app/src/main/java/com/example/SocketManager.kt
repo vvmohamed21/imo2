@@ -48,7 +48,8 @@ data class MediaLoadEvent(
     val mediaUrl: String,
     val timeSeconds: Long = 0L,
     val title: String = "WatchRoom Stream",
-    val senderId: String = ""
+    val senderId: String = "",
+    val referer: String = ""
 )
 
 enum class ConnectionStatus {
@@ -207,10 +208,12 @@ class SocketManager {
                     if (mediaUrl.isNotBlank()) {
                         val time = mediaObj.optDouble("currentTime", 0.0).toLong()
                         val title = mediaObj.optString("title", "WatchRoom Stream")
+                        val referer = mediaObj.optString("referer", "")
                         _currentMedia.value = MediaLoadEvent(
                             mediaUrl = mediaUrl,
                             timeSeconds = time,
-                            title = title
+                            title = title,
+                            referer = referer
                         )
                     }
                 }
@@ -259,13 +262,15 @@ class SocketManager {
                 val time = data.optLong("time", 0L)
                 val title = data.optString("title", "WatchRoom Stream")
                 val senderId = data.optString("senderId", "")
-                Log.i(TAG, "Received media:load -> $mediaUrl at $time s")
+                val referer = data.optString("referer", "")
+                Log.i(TAG, "Received media:load -> $mediaUrl at $time s (referer: $referer)")
                 scope.launch {
                     _currentMedia.value = MediaLoadEvent(
                         mediaUrl = mediaUrl,
                         timeSeconds = time,
                         title = title,
-                        senderId = senderId
+                        senderId = senderId,
+                        referer = referer
                     )
                 }
             }
@@ -357,17 +362,23 @@ class SocketManager {
     /**
      * Broadcast Media Load (Host intercepts stream URL)
      */
-    fun loadMedia(mediaUrl: String, timeSeconds: Long = 0L, title: String = "WatchRoom Stream") {
+    fun loadMedia(
+        mediaUrl: String,
+        timeSeconds: Long = 0L,
+        title: String = "WatchRoom Stream",
+        referer: String = ""
+    ) {
         val sock = socket ?: return
-        _currentMedia.value = MediaLoadEvent(mediaUrl, timeSeconds, title)
+        _currentMedia.value = MediaLoadEvent(mediaUrl, timeSeconds, title, referer = referer)
 
         val payload = JSONObject().apply {
             put("mediaUrl", mediaUrl)
             put("time", timeSeconds)
             put("title", title)
+            put("referer", referer)
         }
         sock.emit("media:load", payload)
-        Log.i(TAG, "Emitted media:load -> $mediaUrl")
+        Log.i(TAG, "Emitted media:load -> $mediaUrl (referer: $referer)")
     }
 
     /**
